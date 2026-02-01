@@ -2,15 +2,15 @@ import ctypes
 import io
 import time
 import win32clipboard
-from pynput.keyboard import Key, Controller as KeyboardController
 
 user32 = ctypes.windll.user32
 
+VK_CONTROL = 0x11
+VK_V = 0x56
+KEYEVENTF_KEYUP = 0x0002
+
 
 class PasteEngine:
-    def __init__(self):
-        self.keyboard = KeyboardController()
-
     def paste(self, content, content_type="text", target_hwnd=None, monitor=None, image_data=None):
         if monitor:
             monitor.set_ignore_next()
@@ -22,12 +22,13 @@ class PasteEngine:
 
         if target_hwnd:
             user32.SetForegroundWindow(target_hwnd)
-            time.sleep(0.08)
+            time.sleep(0.15)
 
-        self.keyboard.press(Key.ctrl)
-        self.keyboard.press('v')
-        self.keyboard.release('v')
-        self.keyboard.release(Key.ctrl)
+        # Ctrl+V via keybd_event
+        user32.keybd_event(VK_CONTROL, 0, 0, 0)
+        user32.keybd_event(VK_V, 0, 0, 0)
+        user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
+        user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
 
     def _set_clipboard_text(self, content):
         try:
@@ -45,11 +46,9 @@ class PasteEngine:
             from PIL import Image
 
             img = Image.open(io.BytesIO(png_bytes))
-            # Convert to BMP DIB for clipboard
             buf = io.BytesIO()
             img.save(buf, format="BMP")
             bmp_data = buf.getvalue()
-            # Skip BMP file header (14 bytes) to get DIB
             dib_data = bmp_data[14:]
 
             win32clipboard.OpenClipboard()

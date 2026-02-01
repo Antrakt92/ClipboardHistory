@@ -52,7 +52,7 @@ def _get_cursor_pos():
 
 
 class PopupWindow(customtkinter.CTkToplevel):
-    def __init__(self, master, database, paste_engine, monitor=None):
+    def __init__(self, master, database, paste_engine, monitor=None, prev_hwnd=None):
         super().__init__(master)
         self.db = database
         self.paste_engine = paste_engine
@@ -60,7 +60,7 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._master = master
         self._closed = False
 
-        self._prev_hwnd = user32.GetForegroundWindow()
+        self._prev_hwnd = prev_hwnd
         self._selected_index = -1
         self._item_frames = []
         self._item_data = []
@@ -153,6 +153,9 @@ class PopupWindow(customtkinter.CTkToplevel):
             scrollbar_button_hover_color="#444444"
         )
         self.items_frame.pack(fill="both", expand=True, padx=6, pady=(2, 2))
+
+        # Speed up mouse wheel scrolling — increase pixel size per "unit"
+        self.items_frame._parent_canvas.configure(yscrollincrement=15)
 
         # Footer
         footer = customtkinter.CTkFrame(c, fg_color="transparent", height=30)
@@ -323,18 +326,30 @@ class PopupWindow(customtkinter.CTkToplevel):
         )
         pin_btn.pack(side="right", padx=(0, 2))
 
-        # Hover
+        # Hover — use winfo_containing to handle nested child widgets
+        def _is_inside_frame(event):
+            try:
+                w = self.winfo_containing(event.x_root, event.y_root)
+                while w is not None:
+                    if w is frame:
+                        return True
+                    w = w.master
+            except Exception:
+                pass
+            return False
+
         def on_enter(_e):
             if index != self._selected_index:
                 frame.configure(fg_color=hover_bg)
-            if is_image:
-                self._hide_image_preview()
+            if is_image and self._preview_after_id is None and self._preview_window is None:
                 self._preview_after_id = self.after(
                     IMAGE_PREVIEW_DELAY,
                     lambda: self._show_image_preview(entry["id"], frame)
                 )
 
         def on_leave(_e):
+            if _is_inside_frame(_e):
+                return
             if index != self._selected_index:
                 frame.configure(fg_color=normal_bg)
             if is_image:
@@ -366,6 +381,9 @@ class PopupWindow(customtkinter.CTkToplevel):
 
     def _show_image_preview(self, entry_id, widget):
         self._hide_image_preview()
+        if self._closed:
+            return
+        preview_win = None
         try:
             image_data = self.db.get_image_data(entry_id)
             if not image_data:
@@ -375,6 +393,7 @@ class PopupWindow(customtkinter.CTkToplevel):
             img.thumbnail(IMAGE_PREVIEW_SIZE, PILImage.Resampling.LANCZOS)
 
             preview_win = customtkinter.CTkToplevel(self)
+            self._preview_window = preview_win
             preview_win.overrideredirect(True)
             preview_win.attributes("-topmost", True)
             preview_win.configure(fg_color=BG)
@@ -414,7 +433,6 @@ class PopupWindow(customtkinter.CTkToplevel):
             py = max(10, min(wy, sh - ph - 10))
 
             preview_win.geometry(f"+{px}+{py}")
-            self._preview_window = preview_win
         except Exception:
             self._hide_image_preview()
 
@@ -438,9 +456,16 @@ class PopupWindow(customtkinter.CTkToplevel):
             return
         if self._search_after_id:
             self.after_cancel(self._search_after_id)
-        self._search_after_id = self.after(
-            150, lambda: self._load_items(self.search_entry.get().strip() or None)
-        )
+        self._search_after_id = self.after(150, self._do_search)
+
+    def _do_search(self):
+        if self._closed:
+            return
+        try:
+            query = self.search_entry.get().strip() or None
+        except Exception:
+            return
+        self._load_items(query)
 
     def _navigate(self, direction):
         if not self._item_frames:
@@ -456,8 +481,8 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._item_frames[self._selected_index].configure(fg_color=SURFACE_SELECTED)
 
     def _paste_selected(self):
-        if 0 <= self._selected_index < len(self._current_entries):
-            entry_id = self._current_entries[self._selected_index]["id"]
+        if 0 <= self._selected_index < len(self._item_data):
+            entry_id = self._item_data[self._selected_index]["id"]
             self._on_item_click(entry_id)
 
     def _on_item_click(self, entry_id):
@@ -502,8 +527,12 @@ class PopupWindow(customtkinter.CTkToplevel):
             return
         try:
             focused = self.focus_get()
-            if focused is None:
-                self.close()
+            if focused is not None:
+                return
+            # Also keep open if preview window is visible
+            if self._preview_window is not None:
+                return
+            self.close()
         except Exception:
             self.close()
 
@@ -532,5 +561,7 @@ class PopupWindow(customtkinter.CTkToplevel):
         self.geometry(f"+{x}+{y}")
 
     def focus(self):
+        if self._closed:
+            return
         self._focus_window()
         self.lift()

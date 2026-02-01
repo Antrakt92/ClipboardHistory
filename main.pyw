@@ -64,16 +64,19 @@ class ClipboardHistoryApp:
             self.db.add_entry(content.strip(), content_type)
 
     def _on_hotkey(self):
-        self.root.after(0, self.show_popup)
+        # Capture the foreground window NOW on the hotkey thread,
+        # before Tk mainloop gets a chance to shift focus
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        self.root.after(0, lambda: self.show_popup(hwnd))
 
-    def show_popup(self):
+    def show_popup(self, prev_hwnd=None):
         try:
             if self.popup is not None and self.popup.winfo_exists():
                 self.popup.focus()
                 return
         except Exception:
             pass
-        self.popup = PopupWindow(self.root, self.db, self.paste_engine, self.monitor)
+        self.popup = PopupWindow(self.root, self.db, self.paste_engine, self.monitor, prev_hwnd=prev_hwnd)
 
     def quit(self):
         self.monitor.stop()

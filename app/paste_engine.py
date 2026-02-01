@@ -51,6 +51,12 @@ def _open_clipboard_retry(attempts=3, delay=0.05):
 class PasteEngine:
     def paste(self, content, content_type="text", target_hwnd=None, monitor=None, image_data=None):
         """Set clipboard and send Ctrl+V. Runs blocking part in a background thread."""
+        # Set ignore BEFORE clipboard write to avoid race condition:
+        # the monitor thread could process WM_CLIPBOARDUPDATE before
+        # we get a chance to set the flag after writing.
+        if monitor:
+            monitor.set_ignore_next()
+
         if content_type == "image" and image_data:
             ok = self._set_clipboard_image(image_data)
         else:
@@ -58,12 +64,10 @@ class PasteEngine:
 
         if not ok:
             log.warning("Failed to set clipboard data, aborting paste")
+            # Reset ignore flag since clipboard write failed
+            if monitor:
+                monitor.clear_ignore()
             return
-
-        # Set ignore AFTER successful clipboard write so the flag
-        # is not wasted if writing failed
-        if monitor:
-            monitor.set_ignore_next()
 
         # Run focus + keypress in a thread to avoid blocking Tk main loop
         threading.Thread(

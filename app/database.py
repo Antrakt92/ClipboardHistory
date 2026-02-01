@@ -12,6 +12,7 @@ class Database:
         self.lock = threading.Lock()
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
         self._create_tables()
         self._migrate()
 
@@ -180,4 +181,5 @@ class Database:
             self.conn.commit()
 
     def close(self):
-        self.conn.close()
+        with self.lock:
+            self.conn.close()

@@ -30,7 +30,6 @@ pip install -r requirements.txt
 
 - [customtkinter](https://github.com/TomSchimansky/CustomTkinter) — modern UI
 - [pywin32](https://github.com/mhammond/pywin32) — clipboard access
-- [pynput](https://github.com/moses-palmer/pynput) — keyboard simulation for paste
 - [pystray](https://github.com/moses-palmer/pystray) — system tray icon
 - [Pillow](https://python-pillow.org/) — image processing
 

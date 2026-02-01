@@ -103,13 +103,16 @@ class Database:
     def get_history(self, limit=50, offset=0, search_query=None):
         with self.lock:
             if search_query:
+                # Escape LIKE wildcards in user input
+                escaped = search_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                pattern = f"%{escaped}%"
                 cursor = self.conn.execute(
                     """SELECT id, LENGTH(content) as content_len, content_type, timestamp, pinned, preview, image_hash
                        FROM clipboard_history
-                       WHERE content LIKE ? OR (content_type = 'image' AND preview LIKE ?)
+                       WHERE content LIKE ? ESCAPE '\\' OR (content_type = 'image' AND preview LIKE ? ESCAPE '\\')
                        ORDER BY pinned DESC, timestamp DESC
                        LIMIT ? OFFSET ?""",
-                    (f"%{search_query}%", f"%{search_query}%", limit, offset)
+                    (pattern, pattern, limit, offset)
                 )
             else:
                 cursor = self.conn.execute(

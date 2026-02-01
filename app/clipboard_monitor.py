@@ -1,6 +1,7 @@
 import ctypes
 import ctypes.wintypes
 import io
+import logging
 import struct
 import threading
 import time as _time
@@ -9,6 +10,8 @@ import win32clipboard
 from PIL import Image
 
 from app.config import MAX_IMAGE_BYTES
+
+log = logging.getLogger(__name__)
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -85,7 +88,10 @@ class ClipboardMonitor:
         wc.hInstance = hinstance
         wc.lpszClassName = class_name
 
-        user32.RegisterClassW(ctypes.byref(wc))
+        if not user32.RegisterClassW(ctypes.byref(wc)):
+            log.error("RegisterClassW failed for clipboard monitor")
+            self._ready.set()
+            return
 
         self._hwnd = user32.CreateWindowExW(
             0, class_name, "ClipboardMonitorWindow",
@@ -95,6 +101,7 @@ class ClipboardMonitor:
 
         if not self._hwnd:
             self._ready.set()
+            user32.UnregisterClassW(class_name, hinstance)
             return
 
         user32.AddClipboardFormatListener(self._hwnd)
@@ -161,7 +168,7 @@ class ClipboardMonitor:
                 if png_bytes:
                     self.on_new_content(png_bytes, "image")
         except Exception:
-            pass
+            log.exception("Error reading clipboard")
 
     @staticmethod
     def _dib_to_png(dib_data):
@@ -180,8 +187,12 @@ class ClipboardMonitor:
             bmp_header += bf_off_bits.to_bytes(4, 'little')
 
             img = Image.open(io.BytesIO(bmp_header + dib_data))
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            return buf.getvalue()
+            try:
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                return buf.getvalue()
+            finally:
+                img.close()
         except Exception:
+            log.debug("Failed to convert DIB to PNG", exc_info=True)
             return None

@@ -1,61 +1,134 @@
 import ctypes
+import ctypes.wintypes
 import io
+import logging
+import threading
 import time
 import win32clipboard
 
 user32 = ctypes.windll.user32
 
+log = logging.getLogger(__name__)
+
 VK_CONTROL = 0x11
 VK_V = 0x56
 KEYEVENTF_KEYUP = 0x0002
+INPUT_KEYBOARD = 1
+
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.wintypes.WORD),
+        ("wScan", ctypes.wintypes.WORD),
+        ("dwFlags", ctypes.wintypes.DWORD),
+        ("time", ctypes.wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
+
+class INPUT(ctypes.Structure):
+    class _INPUT(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT)]
+    _fields_ = [
+        ("type", ctypes.wintypes.DWORD),
+        ("_input", _INPUT),
+    ]
+
+
+def _open_clipboard_retry(attempts=3, delay=0.05):
+    """Try to open the clipboard with retries (another app may hold it briefly)."""
+    for i in range(attempts):
+        try:
+            win32clipboard.OpenClipboard()
+            return True
+        except Exception:
+            if i < attempts - 1:
+                time.sleep(delay)
+    log.warning("Failed to open clipboard after %d attempts", attempts)
+    return False
 
 
 class PasteEngine:
     def paste(self, content, content_type="text", target_hwnd=None, monitor=None, image_data=None):
+        """Set clipboard and send Ctrl+V. Runs blocking part in a background thread."""
+        if content_type == "image" and image_data:
+            ok = self._set_clipboard_image(image_data)
+        else:
+            ok = self._set_clipboard_text(content)
+
+        if not ok:
+            log.warning("Failed to set clipboard data, aborting paste")
+            return
+
+        # Set ignore AFTER successful clipboard write so the flag
+        # is not wasted if writing failed
         if monitor:
             monitor.set_ignore_next()
 
-        if content_type == "image" and image_data:
-            self._set_clipboard_image(image_data)
-        else:
-            self._set_clipboard_text(content)
+        # Run focus + keypress in a thread to avoid blocking Tk main loop
+        threading.Thread(
+            target=self._focus_and_press, args=(target_hwnd,), daemon=True
+        ).start()
 
+    @staticmethod
+    def _make_key_input(vk, flags=0):
+        inp = INPUT()
+        inp.type = INPUT_KEYBOARD
+        inp._input.ki.wVk = vk
+        inp._input.ki.dwFlags = flags
+        return inp
+
+    def _focus_and_press(self, target_hwnd):
         if target_hwnd and user32.IsWindow(target_hwnd):
-            user32.SetForegroundWindow(target_hwnd)
+            result = user32.SetForegroundWindow(target_hwnd)
+            if not result:
+                log.warning("SetForegroundWindow failed for hwnd %s", target_hwnd)
             time.sleep(0.15)
 
-        # Ctrl+V via keybd_event
-        user32.keybd_event(VK_CONTROL, 0, 0, 0)
-        user32.keybd_event(VK_V, 0, 0, 0)
-        user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
-        user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+        # Ctrl+V via SendInput (more reliable than deprecated keybd_event)
+        inputs = (INPUT * 4)(
+            self._make_key_input(VK_CONTROL),
+            self._make_key_input(VK_V),
+            self._make_key_input(VK_V, KEYEVENTF_KEYUP),
+            self._make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+        )
+        user32.SendInput(4, ctypes.byref(inputs), ctypes.sizeof(INPUT))
 
     def _set_clipboard_text(self, content):
         try:
-            win32clipboard.OpenClipboard()
+            if not _open_clipboard_retry():
+                return False
             try:
                 win32clipboard.EmptyClipboard()
                 win32clipboard.SetClipboardText(content, win32clipboard.CF_UNICODETEXT)
             finally:
                 win32clipboard.CloseClipboard()
+            return True
         except Exception:
-            pass
+            log.exception("Failed to set clipboard text")
+            return False
 
     def _set_clipboard_image(self, png_bytes):
         try:
             from PIL import Image
 
             img = Image.open(io.BytesIO(png_bytes))
-            buf = io.BytesIO()
-            img.save(buf, format="BMP")
-            bmp_data = buf.getvalue()
+            try:
+                buf = io.BytesIO()
+                img.save(buf, format="BMP")
+                bmp_data = buf.getvalue()
+            finally:
+                img.close()
             dib_data = bmp_data[14:]
 
-            win32clipboard.OpenClipboard()
+            if not _open_clipboard_retry():
+                return False
             try:
                 win32clipboard.EmptyClipboard()
                 win32clipboard.SetClipboardData(win32clipboard.CF_DIB, dib_data)
             finally:
                 win32clipboard.CloseClipboard()
+            return True
         except Exception:
-            pass
+            log.exception("Failed to set clipboard image")
+            return False

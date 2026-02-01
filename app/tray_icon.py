@@ -1,3 +1,4 @@
+import logging
 import os
 import threading
 import pystray
@@ -5,6 +6,8 @@ from pystray import MenuItem as item, Menu as menu
 from PIL import Image
 
 from app.config import APP_NAME, ICON_PATH
+
+log = logging.getLogger(__name__)
 
 
 class TrayIcon:
@@ -23,6 +26,7 @@ class TrayIcon:
             except Exception:
                 pass
         if not os.path.exists(ICON_PATH):
+            log.warning("Tray icon file not found at %s — tray will not be shown", ICON_PATH)
             return
 
         image = Image.open(ICON_PATH)

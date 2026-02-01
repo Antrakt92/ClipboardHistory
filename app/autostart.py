@@ -23,10 +23,13 @@ def is_autostart_enabled():
 
 
 def enable_autostart():
-    pythonw = _get_pythonw_path()
-    cmd = f'"{pythonw}" "{SCRIPT_PATH}"'
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
-        winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
+    try:
+        pythonw = _get_pythonw_path()
+        cmd = f'"{pythonw}" "{SCRIPT_PATH}"'
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
+    except OSError:
+        pass
 
 
 def disable_autostart():

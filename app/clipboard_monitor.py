@@ -16,19 +16,19 @@ log = logging.getLogger(__name__)
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
-# Fix DefWindowProcW argument types to handle large lparam values
+# Fix DefWindowProcW argument/return types to handle large lparam values
 user32.DefWindowProcW.argtypes = [
     ctypes.wintypes.HWND, ctypes.c_uint,
     ctypes.wintypes.WPARAM, ctypes.wintypes.LPARAM
 ]
-user32.DefWindowProcW.restype = ctypes.c_long
+user32.DefWindowProcW.restype = ctypes.wintypes.LPARAM  # LRESULT is pointer-sized (64-bit on x64)
 
 WM_CLIPBOARDUPDATE = 0x031D
 WM_DESTROY = 0x0002
 WM_QUIT = 0x0012
 
 WNDPROC = ctypes.WINFUNCTYPE(
-    ctypes.c_long,
+    ctypes.wintypes.LPARAM,  # LRESULT (pointer-sized)
     ctypes.wintypes.HWND,
     ctypes.c_uint,
     ctypes.wintypes.WPARAM,
@@ -147,6 +147,7 @@ class ClipboardMonitor:
                     _time.sleep(0.05)
             text_content = None
             raw_dib = None
+            file_list = None
             try:
                 # Prefer text if available
                 if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
@@ -154,8 +155,14 @@ class ClipboardMonitor:
                     if content and content.strip():
                         text_content = content
 
-                # Check for image (CF_DIB) if no text
+                # Check for file drop (CF_HDROP) if no text
                 if text_content is None:
+                    CF_HDROP = 15
+                    if win32clipboard.IsClipboardFormatAvailable(CF_HDROP):
+                        file_list = win32clipboard.GetClipboardData(CF_HDROP)
+
+                # Check for image (CF_DIB) if no text and no files
+                if text_content is None and file_list is None:
                     CF_DIB = 8
                     if win32clipboard.IsClipboardFormatAvailable(CF_DIB):
                         dib_data = win32clipboard.GetClipboardData(CF_DIB)
@@ -167,6 +174,11 @@ class ClipboardMonitor:
             # Process outside clipboard lock
             if text_content:
                 self.on_new_content(text_content, "text")
+            elif file_list:
+                # file_list is a tuple of file paths from CF_HDROP
+                paths_text = "\n".join(file_list)
+                if paths_text.strip():
+                    self.on_new_content(paths_text, "text")
             elif raw_dib:
                 png_bytes = self._dib_to_png(raw_dib)
                 if png_bytes:

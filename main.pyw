@@ -47,27 +47,37 @@ class ClipboardHistoryApp:
         self.root = customtkinter.CTk()
         self.root.withdraw()
 
-        self.db = Database(DB_PATH)
+        self.db = None
+        self.monitor = None
+        self.hotkey = None
+        self.tray = None
         self.paste_engine = PasteEngine()
         self.popup = None
 
-        self.monitor = ClipboardMonitor(on_new_content=self._on_clipboard_change)
-        self.monitor.start()
+        try:
+            self.db = Database(DB_PATH)
 
-        self.hotkey = HotkeyManager(on_activate=self._on_hotkey)
-        self.hotkey.start()
+            self.monitor = ClipboardMonitor(on_new_content=self._on_clipboard_change)
+            self.monitor.start()
 
-        if not self.hotkey.wait_ready():
-            log.warning("Ctrl+Shift+V hotkey could not be registered (another app may use it)")
+            self.hotkey = HotkeyManager(on_activate=self._on_hotkey)
+            self.hotkey.start()
 
-        self.tray = TrayIcon(
-            on_show_popup=lambda: self.root.after(0, self.show_popup),
-            on_toggle_autostart=lambda: toggle_autostart(),
-            on_quit=lambda: self.root.after(0, self.quit),
-            is_autostart_enabled=is_autostart_enabled,
-        )
-        self.tray.start()
-        log.info("Clipboard History Manager started")
+            if not self.hotkey.wait_ready():
+                log.warning("Ctrl+Shift+V hotkey could not be registered (another app may use it)")
+
+            self.tray = TrayIcon(
+                on_show_popup=lambda: self.root.after(0, self.show_popup),
+                on_toggle_autostart=lambda: toggle_autostart(),
+                on_quit=lambda: self.root.after(0, self.quit),
+                is_autostart_enabled=is_autostart_enabled,
+            )
+            self.tray.start()
+            log.info("Clipboard History Manager started")
+        except Exception:
+            log.exception("Failed to initialize, cleaning up")
+            self._stop_components()
+            raise
 
     def _on_clipboard_change(self, content, content_type):
         if content_type == "image":
@@ -94,12 +104,32 @@ class ClipboardHistoryApp:
             self.popup = None
         self.popup = PopupWindow(self.root, self.db, self.paste_engine, self.monitor, prev_hwnd=prev_hwnd)
 
+    def _stop_components(self):
+        """Stop all started components safely (used by quit and init-failure cleanup)."""
+        if self.monitor:
+            try:
+                self.monitor.stop()
+            except Exception:
+                pass
+        if self.hotkey:
+            try:
+                self.hotkey.stop()
+            except Exception:
+                pass
+        if self.tray:
+            try:
+                self.tray.stop()
+            except Exception:
+                pass
+        if self.db:
+            try:
+                self.db.close()
+            except Exception:
+                pass
+
     def quit(self):
         log.info("Shutting down...")
-        self.monitor.stop()
-        self.hotkey.stop()
-        self.tray.stop()
-        self.db.close()
+        self._stop_components()
         ctypes.windll.kernel32.CloseHandle(_mutex)
         self.root.quit()
 

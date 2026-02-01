@@ -108,6 +108,8 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._preview_after_id = None
         self._preview_photo = None
         self._preview_entry_id = None
+        self._confirm_clear = False
+        self._clear_btn = None
 
         self.overrideredirect(True)
         self.attributes("-topmost", True)
@@ -132,6 +134,8 @@ class PopupWindow(customtkinter.CTkToplevel):
         self.bind("<Up>", lambda e: self._navigate(-1))
         self.bind("<Down>", lambda e: self._navigate(1))
         self.bind("<Return>", lambda e: self._paste_selected())
+        self.bind("<Delete>", lambda e: self._delete_selected())
+        self.bind("<Control-p>", lambda e: self._pin_selected())
 
         self.after(10, self._focus_window)
 
@@ -202,13 +206,13 @@ class PopupWindow(customtkinter.CTkToplevel):
         )
         self.count_label.pack(side="left")
 
-        clear_btn = customtkinter.CTkButton(
+        self._clear_btn = customtkinter.CTkButton(
             footer, text="Clear all", width=60, height=22,
             font=("Segoe UI", 10), fg_color="transparent",
             hover_color=SURFACE_HOVER, text_color=TEXT_SECONDARY,
             corner_radius=4, command=self._clear_all
         )
-        clear_btn.pack(side="right")
+        self._clear_btn.pack(side="right")
 
     def _load_items(self, search_query=None):
         if self._closed:
@@ -340,10 +344,12 @@ class PopupWindow(customtkinter.CTkToplevel):
         clickable.append(time_lbl)
 
         if not is_image and content_len >= LARGE_TEXT_THRESHOLD:
-            customtkinter.CTkLabel(
+            chars_lbl = customtkinter.CTkLabel(
                 bot, text=f"  \u00b7  {content_len:,} chars",
                 font=("Segoe UI", 9), text_color=TEXT_DIM
-            ).pack(side="left")
+            )
+            chars_lbl.pack(side="left")
+            clickable.append(chars_lbl)
 
         # Action buttons - inline on the right of the bottom row
         del_btn = customtkinter.CTkButton(
@@ -581,6 +587,16 @@ class PopupWindow(customtkinter.CTkToplevel):
             entry_id = self._item_data[self._selected_index]["id"]
             self._on_item_click(entry_id)
 
+    def _delete_selected(self):
+        if 0 <= self._selected_index < len(self._item_data):
+            entry_id = self._item_data[self._selected_index]["id"]
+            self._delete_item(entry_id)
+
+    def _pin_selected(self):
+        if 0 <= self._selected_index < len(self._item_data):
+            entry_id = self._item_data[self._selected_index]["id"]
+            self._toggle_pin(entry_id)
+
     def _on_item_click(self, entry_id):
         entry = self.db.get_entry(entry_id)
         if not entry:
@@ -608,8 +624,24 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._load_items(search)
 
     def _clear_all(self):
-        self.db.clear_all()
-        self._load_items()
+        if self._confirm_clear:
+            self.db.clear_all()
+            self._confirm_clear = False
+            self._load_items()
+        else:
+            self._confirm_clear = True
+            self._clear_btn.configure(text="Sure?", text_color=DANGER)
+            # Reset confirmation after 2 seconds
+            self.after(2000, self._reset_clear_confirm)
+
+    def _reset_clear_confirm(self):
+        if self._closed:
+            return
+        self._confirm_clear = False
+        try:
+            self._clear_btn.configure(text="Clear all", text_color=TEXT_SECONDARY)
+        except Exception:
+            pass
 
     def _on_focus_out(self, event):
         if self._closed:

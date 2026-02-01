@@ -1,10 +1,13 @@
 """Generate app icon (clipboard) as PNG and ICO."""
+import os
+
 from PIL import Image, ImageDraw
 
 from app.config import ICON_PATH, ICO_PATH
 
 
 def create_icon():
+    os.makedirs(os.path.dirname(ICON_PATH), exist_ok=True)
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)

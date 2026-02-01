@@ -10,6 +10,12 @@ from app.config import POPUP_WIDTH, POPUP_HEIGHT, IMAGE_THUMB_SIZE, IMAGE_PREVIE
 
 user32 = ctypes.windll.user32
 
+# Fix ctypes prototypes for by-value struct and correct return types
+user32.MonitorFromPoint.argtypes = [ctypes.wintypes.POINT, ctypes.wintypes.DWORD]
+user32.MonitorFromPoint.restype = ctypes.wintypes.HMONITOR
+user32.GetMonitorInfoW.argtypes = [ctypes.wintypes.HMONITOR, ctypes.c_void_p]
+user32.GetMonitorInfoW.restype = ctypes.wintypes.BOOL
+
 # Color palette
 BG = "#0f0f0f"
 SURFACE = "#1a1a1a"
@@ -64,15 +70,20 @@ class _MONITORINFO(ctypes.Structure):
 
 def _get_monitor_work_area(x, y):
     """Return (left, top, right, bottom) of the work area on the monitor containing (x, y)."""
-    point = ctypes.wintypes.POINT(x, y)
     MONITOR_DEFAULTTONEAREST = 2
+    point = ctypes.wintypes.POINT(x, y)
     hmon = user32.MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST)
     info = _MONITORINFO()
     info.cbSize = ctypes.sizeof(_MONITORINFO)
     if user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
         rc = info.rcWork
         return rc.left, rc.top, rc.right, rc.bottom
-    return 0, 0, 1920, 1080
+    # Fallback: use primary monitor via SystemMetrics
+    w = user32.GetSystemMetrics(0)  # SM_CXSCREEN
+    h = user32.GetSystemMetrics(1)  # SM_CYSCREEN
+    if w <= 0 or h <= 0:
+        w, h = 1920, 1080
+    return 0, 0, w, h
 
 
 class PopupWindow(customtkinter.CTkToplevel):
@@ -612,9 +623,14 @@ class PopupWindow(customtkinter.CTkToplevel):
             focused = self.focus_get()
             if focused is not None:
                 return
-            # Also keep open if preview window is visible
+            # Check if preview window has focus (not just exists)
             if self._preview_window is not None:
-                return
+                try:
+                    preview_focused = self._preview_window.focus_get()
+                    if preview_focused is not None:
+                        return
+                except Exception:
+                    pass
             # Check if our own Win32 window or a child still has focus
             foreground = user32.GetForegroundWindow()
             try:
@@ -623,6 +639,14 @@ class PopupWindow(customtkinter.CTkToplevel):
                     return
             except Exception:
                 pass
+            # Check if preview Win32 window has focus
+            if self._preview_window is not None:
+                try:
+                    preview_hwnd = int(self._preview_window.wm_frame(), 16)
+                    if foreground == preview_hwnd:
+                        return
+                except Exception:
+                    pass
             # Retry — focus may not have settled yet (e.g. clicking a button)
             if attempt < 2:
                 self.after(120, lambda: self._check_focus(attempt + 1))

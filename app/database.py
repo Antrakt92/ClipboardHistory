@@ -29,16 +29,18 @@ class Database:
     @staticmethod
     def _open_or_recreate(db_path):
         """Open the database, recreating it if corrupted."""
+        conn = None
         try:
             conn = sqlite3.connect(db_path, check_same_thread=False)
             conn.execute("PRAGMA integrity_check")
             return conn
         except sqlite3.DatabaseError:
             log.warning("Database corrupted, recreating: %s", db_path)
-            try:
-                conn.close()
-            except Exception:
-                pass
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
             try:
                 os.remove(db_path)
             except OSError:

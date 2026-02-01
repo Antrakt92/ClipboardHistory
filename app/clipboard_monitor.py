@@ -77,6 +77,10 @@ class ClipboardMonitor:
         with self._ignore_lock:
             self._ignore_next = True
 
+    def clear_ignore(self):
+        with self._ignore_lock:
+            self._ignore_next = False
+
     def _run(self):
         hinstance = kernel32.GetModuleHandleW(None)
         class_name = "ClipboardHistoryMonitor"

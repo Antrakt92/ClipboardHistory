@@ -33,6 +33,8 @@ LARGE_TEXT_THRESHOLD = 500
 
 def relative_time(timestamp):
     diff = time.time() - timestamp
+    if diff < 0:
+        return "now"
     if diff < 60:
         return "now"
     elif diff < 3600:

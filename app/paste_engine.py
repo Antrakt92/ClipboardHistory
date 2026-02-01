@@ -20,7 +20,7 @@ class PasteEngine:
         else:
             self._set_clipboard_text(content)
 
-        if target_hwnd:
+        if target_hwnd and user32.IsWindow(target_hwnd):
             user32.SetForegroundWindow(target_hwnd)
             time.sleep(0.15)
 

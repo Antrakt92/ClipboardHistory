@@ -1,7 +1,12 @@
 import ctypes
 import ctypes.wintypes
 import io
+import struct
 import threading
+import time as _time
+
+import win32clipboard
+from PIL import Image
 
 from app.config import MAX_IMAGE_BYTES
 
@@ -118,8 +123,6 @@ class ClipboardMonitor:
 
     def _read_clipboard(self):
         try:
-            import win32clipboard
-            import time as _time
             # Retry OpenClipboard — another app may hold it briefly
             for _attempt in range(3):
                 try:
@@ -129,33 +132,37 @@ class ClipboardMonitor:
                     if _attempt == 2:
                         return
                     _time.sleep(0.05)
+            result_content = None
+            result_type = None
             try:
                 # Prefer text if available
                 if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
                     content = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
                     if content and content.strip():
-                        self.on_new_content(content, "text")
-                        return
+                        result_content = content
+                        result_type = "text"
 
-                # Check for image (CF_DIB)
-                CF_DIB = 8
-                if win32clipboard.IsClipboardFormatAvailable(CF_DIB):
-                    dib_data = win32clipboard.GetClipboardData(CF_DIB)
-                    if dib_data and len(dib_data) <= MAX_IMAGE_BYTES:
-                        png_bytes = self._dib_to_png(dib_data)
-                        if png_bytes:
-                            self.on_new_content(png_bytes, "image")
+                # Check for image (CF_DIB) if no text
+                if result_content is None:
+                    CF_DIB = 8
+                    if win32clipboard.IsClipboardFormatAvailable(CF_DIB):
+                        dib_data = win32clipboard.GetClipboardData(CF_DIB)
+                        if dib_data and len(dib_data) <= MAX_IMAGE_BYTES:
+                            png_bytes = self._dib_to_png(dib_data)
+                            if png_bytes:
+                                result_content = png_bytes
+                                result_type = "image"
             finally:
                 win32clipboard.CloseClipboard()
+
+            if result_content is not None:
+                self.on_new_content(result_content, result_type)
         except Exception:
             pass
 
     @staticmethod
     def _dib_to_png(dib_data):
         try:
-            import struct
-            from PIL import Image
-
             # Calculate correct pixel data offset from DIB header
             bi_size = struct.unpack_from('<I', dib_data, 0)[0]
             bit_count = struct.unpack_from('<H', dib_data, 14)[0]

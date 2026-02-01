@@ -49,6 +49,9 @@ class ClipboardHistoryApp:
         self.hotkey = HotkeyManager(on_activate=self._on_hotkey)
         self.hotkey.start()
 
+        if not self.hotkey.wait_ready():
+            print("Warning: Ctrl+Shift+V hotkey could not be registered (another app may use it)")
+
         self.tray = TrayIcon(
             on_show_popup=lambda: self.root.after(0, self.show_popup),
             on_toggle_autostart=lambda: toggle_autostart(),
@@ -70,12 +73,14 @@ class ClipboardHistoryApp:
         self.root.after(0, lambda: self.show_popup(hwnd))
 
     def show_popup(self, prev_hwnd=None):
-        try:
-            if self.popup is not None and self.popup.winfo_exists():
-                self.popup.focus()
-                return
-        except Exception:
-            pass
+        if self.popup is not None:
+            try:
+                if self.popup.winfo_exists() and not self.popup._closed:
+                    self.popup.focus()
+                    return
+            except Exception:
+                pass
+            self.popup = None
         self.popup = PopupWindow(self.root, self.db, self.paste_engine, self.monitor, prev_hwnd=prev_hwnd)
 
     def quit(self):

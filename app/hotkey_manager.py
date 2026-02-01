@@ -25,10 +25,16 @@ class HotkeyManager:
         self.on_activate = on_activate
         self._thread = None
         self._thread_id = None
+        self._ready = threading.Event()
+        self.registered = False
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def wait_ready(self, timeout=2):
+        self._ready.wait(timeout)
+        return self.registered
 
     def stop(self):
         if self._thread_id:
@@ -39,6 +45,8 @@ class HotkeyManager:
 
         # Register Ctrl+Shift+V globally (VK code = layout-independent)
         result = user32.RegisterHotKey(None, HOTKEY_ID, MOD_CTRL | MOD_SHIFT | MOD_NOREPEAT, VK_V)
+        self.registered = bool(result)
+        self._ready.set()
         if not result:
             return
 

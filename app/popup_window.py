@@ -66,7 +66,6 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._selected_index = -1
         self._item_frames = []
         self._item_data = []
-        self._current_entries = []
         self._search_after_id = None
         self._drag_x = 0
         self._drag_y = 0
@@ -190,7 +189,6 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._thumb_cache = {}
 
         entries = self.db.get_history(limit=100, search_query=search_query)
-        self._current_entries = entries
 
         if not entries:
             empty = customtkinter.CTkLabel(

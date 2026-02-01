@@ -63,10 +63,12 @@ class ClipboardMonitor:
     def start(self):
         self._thread.start()
 
-    def stop(self):
+    def stop(self, timeout=2):
         self._running.clear()
         if self._hwnd:
             user32.PostMessageW(self._hwnd, WM_QUIT, 0, 0)
+        if self._thread.is_alive():
+            self._thread.join(timeout)
 
     def set_ignore_next(self):
         with self._ignore_lock:

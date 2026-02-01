@@ -76,6 +76,8 @@ class ClipboardHistoryApp:
         if self.popup is not None:
             try:
                 if self.popup.winfo_exists() and not self.popup._closed:
+                    if prev_hwnd:
+                        self.popup._prev_hwnd = prev_hwnd
                     self.popup.focus()
                     return
             except Exception:

@@ -36,9 +36,11 @@ class HotkeyManager:
         self._ready.wait(timeout)
         return self.registered
 
-    def stop(self):
+    def stop(self, timeout=2):
         if self._thread_id:
             user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout)
 
     def _run(self):
         self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()

@@ -15,6 +15,7 @@ user32.MonitorFromPoint.argtypes = [ctypes.wintypes.POINT, ctypes.wintypes.DWORD
 user32.MonitorFromPoint.restype = ctypes.wintypes.HMONITOR
 user32.GetMonitorInfoW.argtypes = [ctypes.wintypes.HMONITOR, ctypes.c_void_p]
 user32.GetMonitorInfoW.restype = ctypes.wintypes.BOOL
+user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
 
 # Color palette
 BG = "#0f0f0f"
@@ -101,6 +102,7 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._item_frames = []
         self._item_data = []
         self._search_after_id = None
+        self._last_search_text = ""
         self._drag_x = 0
         self._drag_y = 0
         self._thumb_cache = {}
@@ -110,6 +112,7 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._preview_entry_id = None
         self._confirm_clear = False
         self._clear_btn = None
+        self._focus_check_id = None
 
         self.overrideredirect(True)
         self.attributes("-topmost", True)
@@ -519,6 +522,14 @@ class PopupWindow(customtkinter.CTkToplevel):
     def _on_search_change(self, event=None):
         if self._closed:
             return
+        # Only trigger search if text actually changed (ignore arrow/special keys)
+        try:
+            current = self.search_entry.get()
+        except Exception:
+            return
+        if current == self._last_search_text:
+            return
+        self._last_search_text = current
         if self._search_after_id:
             self.after_cancel(self._search_after_id)
         self._search_after_id = self.after(150, self._do_search)
@@ -627,7 +638,8 @@ class PopupWindow(customtkinter.CTkToplevel):
         if self._confirm_clear:
             self.db.clear_all()
             self._confirm_clear = False
-            self._load_items()
+            search = self.search_entry.get().strip() or None
+            self._load_items(search)
         else:
             self._confirm_clear = True
             self._clear_btn.configure(text="Sure?", text_color=DANGER)
@@ -646,9 +658,15 @@ class PopupWindow(customtkinter.CTkToplevel):
     def _on_focus_out(self, event):
         if self._closed:
             return
-        self.after(150, lambda: self._check_focus(0))
+        # Debounce: cancel any pending check and reschedule.
+        # Internal focus transitions (search → button) keep pushing the timer
+        # back, so _check_focus only runs once focus has been stable for 150ms.
+        if self._focus_check_id is not None:
+            self.after_cancel(self._focus_check_id)
+        self._focus_check_id = self.after(150, lambda: self._check_focus(0))
 
     def _check_focus(self, attempt):
+        self._focus_check_id = None
         if self._closed:
             return
         try:
@@ -692,6 +710,11 @@ class PopupWindow(customtkinter.CTkToplevel):
             return
         self._closed = True
         self._hide_image_preview()
+        if self._focus_check_id:
+            try:
+                self.after_cancel(self._focus_check_id)
+            except Exception:
+                pass
         if self._search_after_id:
             try:
                 self.after_cancel(self._search_after_id)

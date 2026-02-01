@@ -8,10 +8,20 @@ import win32clipboard
 
 user32 = ctypes.windll.user32
 
+# Fix prototypes for x64 safety (default restype c_int truncates pointer-sized HWND)
+user32.IsWindow.argtypes = [ctypes.wintypes.HWND]
+user32.IsWindow.restype = ctypes.wintypes.BOOL
+user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
+user32.SetForegroundWindow.restype = ctypes.wintypes.BOOL
+user32.SendInput.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_int]
+user32.SendInput.restype = ctypes.c_uint
+
 log = logging.getLogger(__name__)
 
 VK_CONTROL = 0x11
 VK_V = 0x56
+SCAN_CONTROL = 0x1D
+SCAN_V = 0x2F
 KEYEVENTF_KEYUP = 0x0002
 INPUT_KEYBOARD = 1
 
@@ -86,10 +96,11 @@ class PasteEngine:
         ).start()
 
     @staticmethod
-    def _make_key_input(vk, flags=0):
+    def _make_key_input(vk, scan, flags=0):
         inp = INPUT()
         inp.type = INPUT_KEYBOARD
         inp._input.ki.wVk = vk
+        inp._input.ki.wScan = scan
         inp._input.ki.dwFlags = flags
         return inp
 
@@ -102,10 +113,10 @@ class PasteEngine:
 
         # Ctrl+V via SendInput (more reliable than deprecated keybd_event)
         inputs = (INPUT * 4)(
-            self._make_key_input(VK_CONTROL),
-            self._make_key_input(VK_V),
-            self._make_key_input(VK_V, KEYEVENTF_KEYUP),
-            self._make_key_input(VK_CONTROL, KEYEVENTF_KEYUP),
+            self._make_key_input(VK_CONTROL, SCAN_CONTROL),
+            self._make_key_input(VK_V, SCAN_V),
+            self._make_key_input(VK_V, SCAN_V, KEYEVENTF_KEYUP),
+            self._make_key_input(VK_CONTROL, SCAN_CONTROL, KEYEVENTF_KEYUP),
         )
         user32.SendInput(4, ctypes.byref(inputs), ctypes.sizeof(INPUT))
 

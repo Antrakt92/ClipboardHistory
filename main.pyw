@@ -29,6 +29,9 @@ if _kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
 
 import customtkinter
 
+# Fix GetForegroundWindow to return pointer-sized HWND (not truncated c_int on x64)
+ctypes.windll.user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
+
 from app.config import DB_PATH, ICON_PATH
 from app.database import Database
 from app.clipboard_monitor import ClipboardMonitor
@@ -71,7 +74,7 @@ class ClipboardHistoryApp:
                 log.warning("Ctrl+Shift+V hotkey could not be registered (another app may use it)")
 
             self.tray = TrayIcon(
-                on_show_popup=lambda: self.root.after(0, self.show_popup),
+                on_show_popup=lambda: self._show_popup_from_tray(),
                 on_toggle_autostart=lambda: toggle_autostart(),
                 on_quit=lambda: self.root.after(0, self.quit),
                 is_autostart_enabled=is_autostart_enabled,
@@ -88,6 +91,11 @@ class ClipboardHistoryApp:
             self.db.add_entry("", content_type, image_data=content)
         elif content and content.strip():
             self.db.add_entry(content.strip(), content_type)
+
+    def _show_popup_from_tray(self):
+        # Capture foreground window on the tray thread before Tk shifts focus
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        self.root.after(0, lambda: self.show_popup(hwnd))
 
     def _on_hotkey(self):
         # Capture the foreground window NOW on the hotkey thread,

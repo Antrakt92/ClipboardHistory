@@ -53,6 +53,28 @@ def _get_cursor_pos():
     return point.x, point.y
 
 
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.wintypes.DWORD),
+        ("rcMonitor", ctypes.wintypes.RECT),
+        ("rcWork", ctypes.wintypes.RECT),
+        ("dwFlags", ctypes.wintypes.DWORD),
+    ]
+
+
+def _get_monitor_work_area(x, y):
+    """Return (left, top, right, bottom) of the work area on the monitor containing (x, y)."""
+    point = ctypes.wintypes.POINT(x, y)
+    MONITOR_DEFAULTTONEAREST = 2
+    hmon = user32.MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST)
+    info = _MONITORINFO()
+    info.cbSize = ctypes.sizeof(_MONITORINFO)
+    if user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+        rc = info.rcWork
+        return rc.left, rc.top, rc.right, rc.bottom
+    return 0, 0, 1920, 1080
+
+
 class PopupWindow(customtkinter.CTkToplevel):
     def __init__(self, master, database, paste_engine, monitor=None, prev_hwnd=None):
         super().__init__(master)
@@ -64,6 +86,7 @@ class PopupWindow(customtkinter.CTkToplevel):
 
         self._prev_hwnd = prev_hwnd
         self._selected_index = -1
+        self._hovered_index = -1
         self._item_frames = []
         self._item_data = []
         self._search_after_id = None
@@ -73,16 +96,16 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._preview_window = None
         self._preview_after_id = None
         self._preview_photo = None
+        self._preview_entry_id = None
 
         self.overrideredirect(True)
         self.attributes("-topmost", True)
         self.configure(fg_color=BG)
 
         cx, cy = _get_cursor_pos()
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        x = max(10, min(cx - POPUP_WIDTH // 2, sw - POPUP_WIDTH - 10))
-        y = max(10, min(cy - 40, sh - POPUP_HEIGHT - 40))
+        ml, mt, mr, mb = _get_monitor_work_area(cx, cy)
+        x = max(ml + 10, min(cx - POPUP_WIDTH // 2, mr - POPUP_WIDTH - 10))
+        y = max(mt + 10, min(cy - 40, mb - POPUP_HEIGHT - 10))
         self.geometry(f"{POPUP_WIDTH}x{POPUP_HEIGHT}+{x}+{y}")
 
         self._border_frame = customtkinter.CTkFrame(
@@ -125,8 +148,8 @@ class PopupWindow(customtkinter.CTkToplevel):
         title.pack(side="left")
 
         close_btn = customtkinter.CTkButton(
-            header, text="", width=26, height=26,
-            font=("Segoe UI", 12), fg_color="transparent",
+            header, text="\u00d7", width=26, height=26,
+            font=("Segoe UI", 14), fg_color="transparent",
             hover_color=SURFACE_HOVER, text_color=TEXT_DIM,
             corner_radius=6, command=self.close
         )
@@ -180,12 +203,17 @@ class PopupWindow(customtkinter.CTkToplevel):
         if self._closed:
             return
 
+        self._hide_image_preview()
+
         for widget in self.items_frame.winfo_children():
             widget.destroy()
 
         self._item_frames = []
         self._item_data = []
         self._selected_index = -1
+        self._hovered_index = -1
+        # Keep thumbnail cache across reloads to avoid re-reading from DB
+        old_cache = self._thumb_cache
         self._thumb_cache = {}
 
         entries = self.db.get_history(limit=100, search_query=search_query)
@@ -218,14 +246,14 @@ class PopupWindow(customtkinter.CTkToplevel):
                 ).pack(fill="x", padx=10, pady=(2, 2))
 
             idx = len(self._item_frames)
-            frame = self._create_item_widget(entry, idx)
+            frame = self._create_item_widget(entry, idx, old_cache)
             self._item_frames.append(frame)
             self._item_data.append(entry)
 
         n = len(entries)
         self.count_label.configure(text=f"{n} item{'s' if n != 1 else ''}")
 
-    def _create_item_widget(self, entry, index):
+    def _create_item_widget(self, entry, index, old_thumb_cache=None):
         is_pinned = entry["pinned"]
         is_image = entry["content_type"] == "image"
         normal_bg = SURFACE_PINNED if is_pinned else SURFACE
@@ -245,7 +273,7 @@ class PopupWindow(customtkinter.CTkToplevel):
             row.pack(fill="x", padx=10, pady=5)
             clickable.append(row)
 
-            thumb = self._create_thumbnail(row, entry["id"])
+            thumb = self._create_thumbnail(row, entry["id"], old_thumb_cache)
             if thumb:
                 thumb.pack(side="left", padx=(0, 8))
                 clickable.append(thumb)
@@ -255,7 +283,7 @@ class PopupWindow(customtkinter.CTkToplevel):
             clickable.append(info)
 
             badge = customtkinter.CTkLabel(
-                info, text=f"IMAGE  ·  {entry['preview'] or 'Image'}",
+                info, text=f"IMAGE  \u00b7  {entry['preview'] or 'Image'}",
                 font=("Segoe UI", 11), text_color=IMAGE_BADGE, anchor="w"
             )
             badge.pack(anchor="w")
@@ -287,16 +315,10 @@ class PopupWindow(customtkinter.CTkToplevel):
             bot.pack(fill="x", padx=10, pady=(1, 4))
             clickable.append(bot)
 
-            if content_len >= LARGE_TEXT_THRESHOLD:
-                customtkinter.CTkLabel(
-                    bot, text=f"  ·  {content_len:,} chars",
-                    font=("Segoe UI", 9), text_color=TEXT_DIM
-                ).pack(side="left")
-
         # Time label (shared for both types)
         time_text = relative_time(entry["timestamp"])
         if is_pinned:
-            time_text = "Pinned · " + time_text
+            time_text = "Pinned \u00b7 " + time_text
 
         time_lbl = customtkinter.CTkLabel(
             bot, text=time_text,
@@ -305,6 +327,12 @@ class PopupWindow(customtkinter.CTkToplevel):
         )
         time_lbl.pack(side="left")
         clickable.append(time_lbl)
+
+        if not is_image and content_len >= LARGE_TEXT_THRESHOLD:
+            customtkinter.CTkLabel(
+                bot, text=f"  \u00b7  {content_len:,} chars",
+                font=("Segoe UI", 9), text_color=TEXT_DIM
+            ).pack(side="left")
 
         # Action buttons - inline on the right of the bottom row
         del_btn = customtkinter.CTkButton(
@@ -339,17 +367,22 @@ class PopupWindow(customtkinter.CTkToplevel):
             return False
 
         def on_enter(_e):
+            self._hovered_index = index
             if index != self._selected_index:
                 frame.configure(fg_color=hover_bg)
-            if is_image and self._preview_after_id is None and self._preview_window is None:
-                self._preview_after_id = self.after(
-                    IMAGE_PREVIEW_DELAY,
-                    lambda: self._show_image_preview(entry["id"], frame)
-                )
+            if is_image:
+                # Always schedule preview (re-schedule if switching between images)
+                if self._preview_entry_id != entry["id"]:
+                    self._hide_image_preview()
+                    self._preview_after_id = self.after(
+                        IMAGE_PREVIEW_DELAY,
+                        lambda: self._show_image_preview(entry["id"], frame)
+                    )
 
         def on_leave(_e):
             if _is_inside_frame(_e):
                 return
+            self._hovered_index = -1
             if index != self._selected_index:
                 frame.configure(fg_color=normal_bg)
             if is_image:
@@ -363,15 +396,25 @@ class PopupWindow(customtkinter.CTkToplevel):
 
         return frame
 
-    def _create_thumbnail(self, parent, entry_id):
+    def _create_thumbnail(self, parent, entry_id, old_cache=None):
         try:
+            # Reuse cached PhotoImage if available
+            if old_cache and entry_id in old_cache:
+                tk_img = old_cache[entry_id]
+                label = customtkinter.CTkLabel(parent, image=tk_img, text="")
+                self._thumb_cache[entry_id] = tk_img
+                return label
+
             image_data = self.db.get_image_data(entry_id)
             if not image_data:
                 return None
 
             img = PILImage.open(io.BytesIO(image_data))
-            img.thumbnail(IMAGE_THUMB_SIZE, PILImage.Resampling.LANCZOS)
-            tk_img = ImageTk.PhotoImage(img)
+            try:
+                img.thumbnail(IMAGE_THUMB_SIZE, PILImage.Resampling.LANCZOS)
+                tk_img = ImageTk.PhotoImage(img)
+            finally:
+                img.close()
 
             label = customtkinter.CTkLabel(parent, image=tk_img, text="")
             self._thumb_cache[entry_id] = tk_img
@@ -383,17 +426,21 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._hide_image_preview()
         if self._closed:
             return
-        preview_win = None
         try:
             image_data = self.db.get_image_data(entry_id)
             if not image_data:
                 return
 
             img = PILImage.open(io.BytesIO(image_data))
-            img.thumbnail(IMAGE_PREVIEW_SIZE, PILImage.Resampling.LANCZOS)
+            try:
+                img.thumbnail(IMAGE_PREVIEW_SIZE, PILImage.Resampling.LANCZOS)
+                tk_img = ImageTk.PhotoImage(img)
+            finally:
+                img.close()
 
             preview_win = customtkinter.CTkToplevel(self)
             self._preview_window = preview_win
+            self._preview_entry_id = entry_id
             preview_win.overrideredirect(True)
             preview_win.attributes("-topmost", True)
             preview_win.configure(fg_color=BG)
@@ -404,7 +451,6 @@ class PopupWindow(customtkinter.CTkToplevel):
             )
             border.pack(fill="both", expand=True, padx=1, pady=1)
 
-            tk_img = ImageTk.PhotoImage(img)
             self._preview_photo = tk_img
 
             label = customtkinter.CTkLabel(border, image=tk_img, text="")
@@ -417,10 +463,11 @@ class PopupWindow(customtkinter.CTkToplevel):
             ph = preview_win.winfo_reqheight()
             popup_x = self.winfo_x()
             popup_w = self.winfo_width()
-            sw = self.winfo_screenwidth()
-            sh = self.winfo_screenheight()
 
-            if popup_x + popup_w + pw + 10 < sw:
+            # Use actual monitor work area instead of primary screen size
+            ml, mt, mr, mb = _get_monitor_work_area(popup_x + popup_w // 2, self.winfo_y())
+
+            if popup_x + popup_w + pw + 10 < mr:
                 px = popup_x + popup_w + 8
             else:
                 px = popup_x - pw - 8
@@ -430,7 +477,7 @@ class PopupWindow(customtkinter.CTkToplevel):
                 wy = widget.winfo_rooty()
             except Exception:
                 wy = self.winfo_y()
-            py = max(10, min(wy, sh - ph - 10))
+            py = max(mt + 10, min(wy, mb - ph - 10))
 
             preview_win.geometry(f"+{px}+{py}")
         except Exception:
@@ -450,6 +497,7 @@ class PopupWindow(customtkinter.CTkToplevel):
                 pass
             self._preview_window = None
         self._preview_photo = None
+        self._preview_entry_id = None
 
     def _on_search_change(self, event=None):
         if self._closed:
@@ -467,14 +515,27 @@ class PopupWindow(customtkinter.CTkToplevel):
             return
         self._load_items(query)
 
+    def _get_item_normal_bg(self, index):
+        """Return the normal (non-hover, non-selected) bg for item at index."""
+        if 0 <= index < len(self._item_data):
+            return SURFACE_PINNED if self._item_data[index]["pinned"] else SURFACE
+        return SURFACE
+
     def _navigate(self, direction):
         if not self._item_frames:
             return
 
+        # Reset previously selected item
         if 0 <= self._selected_index < len(self._item_frames):
-            e = self._item_data[self._selected_index]
-            bg = SURFACE_PINNED if e["pinned"] else SURFACE
-            self._item_frames[self._selected_index].configure(fg_color=bg)
+            self._item_frames[self._selected_index].configure(
+                fg_color=self._get_item_normal_bg(self._selected_index)
+            )
+
+        # Also reset hovered item if it differs from the new selection
+        if 0 <= self._hovered_index < len(self._item_frames) and self._hovered_index != self._selected_index:
+            self._item_frames[self._hovered_index].configure(
+                fg_color=self._get_item_normal_bg(self._hovered_index)
+            )
 
         self._selected_index += direction
         self._selected_index = max(0, min(self._selected_index, len(self._item_frames) - 1))
@@ -486,15 +547,21 @@ class PopupWindow(customtkinter.CTkToplevel):
             canvas = self.items_frame._parent_canvas
             frame.update_idletasks()
             canvas.update_idletasks()
+            bbox = canvas.bbox("all")
+            if bbox is None:
+                return
+            total_height = bbox[3]
+            if total_height <= 0:
+                return
             fy = frame.winfo_y()
             fh = frame.winfo_height()
             canvas_h = canvas.winfo_height()
             visible_top = canvas.canvasy(0)
             visible_bottom = visible_top + canvas_h
             if fy < visible_top:
-                canvas.yview_moveto(fy / canvas.bbox("all")[3])
+                canvas.yview_moveto(fy / total_height)
             elif fy + fh > visible_bottom:
-                canvas.yview_moveto((fy + fh - canvas_h) / canvas.bbox("all")[3])
+                canvas.yview_moveto((fy + fh - canvas_h) / total_height)
         except Exception:
             pass
 
@@ -517,9 +584,7 @@ class PopupWindow(customtkinter.CTkToplevel):
 
         self.close()
 
-        self._master.after(50, lambda: paste_engine.paste(
-            content, content_type, prev_hwnd, monitor, image_data=image_data
-        ))
+        paste_engine.paste(content, content_type, prev_hwnd, monitor, image_data=image_data)
 
     def _toggle_pin(self, entry_id):
         self.db.toggle_pin(entry_id)
@@ -538,9 +603,9 @@ class PopupWindow(customtkinter.CTkToplevel):
     def _on_focus_out(self, event):
         if self._closed:
             return
-        self.after(100, self._check_focus)
+        self.after(150, lambda: self._check_focus(0))
 
-    def _check_focus(self):
+    def _check_focus(self, attempt):
         if self._closed:
             return
         try:
@@ -549,6 +614,18 @@ class PopupWindow(customtkinter.CTkToplevel):
                 return
             # Also keep open if preview window is visible
             if self._preview_window is not None:
+                return
+            # Check if our own Win32 window or a child still has focus
+            foreground = user32.GetForegroundWindow()
+            try:
+                own_hwnd = int(self.wm_frame(), 16)
+                if foreground == own_hwnd:
+                    return
+            except Exception:
+                pass
+            # Retry — focus may not have settled yet (e.g. clicking a button)
+            if attempt < 2:
+                self.after(120, lambda: self._check_focus(attempt + 1))
                 return
             self.close()
         except Exception:

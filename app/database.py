@@ -1,20 +1,49 @@
 import hashlib
+import logging
+import os
 import sqlite3
 import threading
 import time
 
 from app.config import DB_PATH, MAX_HISTORY_SIZE, MAX_CONTENT_LENGTH, PREVIEW_LENGTH
 
+log = logging.getLogger(__name__)
+
+# Auto-delete unpinned entries older than this (days)
+AUTO_EXPIRE_DAYS = 30
+
 
 class Database:
     def __init__(self, db_path=None):
         self.db_path = db_path or DB_PATH
         self.lock = threading.Lock()
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._closed = False
+        self.conn = self._open_or_recreate(self.db_path)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA busy_timeout=3000")
         self._create_tables()
         self._migrate()
+        self._expire_old_entries()
+
+    @staticmethod
+    def _open_or_recreate(db_path):
+        """Open the database, recreating it if corrupted."""
+        try:
+            conn = sqlite3.connect(db_path, check_same_thread=False)
+            conn.execute("PRAGMA integrity_check")
+            return conn
+        except sqlite3.DatabaseError:
+            log.warning("Database corrupted, recreating: %s", db_path)
+            try:
+                conn.close()
+            except Exception:
+                pass
+            try:
+                os.remove(db_path)
+            except OSError:
+                pass
+            return sqlite3.connect(db_path, check_same_thread=False)
 
     def _create_tables(self):
         with self.lock:
@@ -49,7 +78,19 @@ class Database:
                 self.conn.execute("ALTER TABLE clipboard_history ADD COLUMN image_hash TEXT")
                 self.conn.commit()
 
+    def _expire_old_entries(self):
+        """Delete unpinned entries older than AUTO_EXPIRE_DAYS."""
+        cutoff = time.time() - AUTO_EXPIRE_DAYS * 86400
+        with self.lock:
+            self.conn.execute(
+                "DELETE FROM clipboard_history WHERE pinned = 0 AND timestamp < ?",
+                (cutoff,)
+            )
+            self.conn.commit()
+
     def add_entry(self, content, content_type="text", image_data=None):
+        if self._closed:
+            return False
         if content_type == "image":
             return self._add_image_entry(image_data)
 
@@ -60,6 +101,8 @@ class Database:
         preview = content[:PREVIEW_LENGTH].replace('\n', ' ').strip()
 
         with self.lock:
+            if self._closed:
+                return False
             cursor = self.conn.execute(
                 "SELECT content, content_type FROM clipboard_history ORDER BY timestamp DESC LIMIT 1"
             )
@@ -79,9 +122,11 @@ class Database:
         if not image_data:
             return False
 
-        img_hash = hashlib.md5(image_data).hexdigest()
+        img_hash = hashlib.sha256(image_data).hexdigest()
 
         with self.lock:
+            if self._closed:
+                return False
             # Dedup: check last entry
             cursor = self.conn.execute(
                 "SELECT image_hash FROM clipboard_history ORDER BY timestamp DESC LIMIT 1"
@@ -103,6 +148,8 @@ class Database:
 
     def get_history(self, limit=50, offset=0, search_query=None):
         with self.lock:
+            if self._closed:
+                return []
             if search_query:
                 # Escape LIKE wildcards in user input
                 escaped = search_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -127,6 +174,8 @@ class Database:
 
     def get_entry(self, entry_id):
         with self.lock:
+            if self._closed:
+                return None
             cursor = self.conn.execute(
                 "SELECT * FROM clipboard_history WHERE id = ?", (entry_id,)
             )
@@ -135,6 +184,8 @@ class Database:
 
     def get_image_data(self, entry_id):
         with self.lock:
+            if self._closed:
+                return None
             cursor = self.conn.execute(
                 "SELECT image_data FROM clipboard_history WHERE id = ?", (entry_id,)
             )
@@ -143,6 +194,8 @@ class Database:
 
     def delete_entry(self, entry_id):
         with self.lock:
+            if self._closed:
+                return
             self.conn.execute(
                 "DELETE FROM clipboard_history WHERE id = ?", (entry_id,)
             )
@@ -150,6 +203,8 @@ class Database:
 
     def toggle_pin(self, entry_id):
         with self.lock:
+            if self._closed:
+                return
             self.conn.execute(
                 "UPDATE clipboard_history SET pinned = CASE WHEN pinned = 1 THEN 0 ELSE 1 END WHERE id = ?",
                 (entry_id,)
@@ -158,6 +213,8 @@ class Database:
 
     def clear_all(self):
         with self.lock:
+            if self._closed:
+                return
             self.conn.execute(
                 "DELETE FROM clipboard_history WHERE pinned = 0"
             )
@@ -169,7 +226,14 @@ class Database:
         ).fetchone()["cnt"]
 
         if count > MAX_HISTORY_SIZE:
+            unpinned = self.conn.execute(
+                "SELECT COUNT(*) as cnt FROM clipboard_history WHERE pinned = 0"
+            ).fetchone()["cnt"]
+            if unpinned == 0:
+                log.debug("All %d entries are pinned, skipping cleanup", count)
+                return
             excess = count - MAX_HISTORY_SIZE
+            to_delete = min(excess, unpinned)
             self.conn.execute("""
                 DELETE FROM clipboard_history WHERE id IN (
                     SELECT id FROM clipboard_history
@@ -177,9 +241,12 @@ class Database:
                     ORDER BY timestamp ASC
                     LIMIT ?
                 )
-            """, (excess,))
+            """, (to_delete,))
             self.conn.commit()
 
     def close(self):
         with self.lock:
-            self.conn.close()
+            self._closed = True
+            if self.conn:
+                self.conn.close()
+                self.conn = None

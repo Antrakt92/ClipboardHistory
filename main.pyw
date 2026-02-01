@@ -6,9 +6,17 @@ Runs in system tray with no console window.
 import os
 import sys
 import ctypes
+import logging
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger(__name__)
 
 # Single instance check via Named Mutex
 _mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "ClipboardHistoryManager_SingleInstance")
@@ -50,7 +58,7 @@ class ClipboardHistoryApp:
         self.hotkey.start()
 
         if not self.hotkey.wait_ready():
-            print("Warning: Ctrl+Shift+V hotkey could not be registered (another app may use it)")
+            log.warning("Ctrl+Shift+V hotkey could not be registered (another app may use it)")
 
         self.tray = TrayIcon(
             on_show_popup=lambda: self.root.after(0, self.show_popup),
@@ -59,6 +67,7 @@ class ClipboardHistoryApp:
             is_autostart_enabled=is_autostart_enabled,
         )
         self.tray.start()
+        log.info("Clipboard History Manager started")
 
     def _on_clipboard_change(self, content, content_type):
         if content_type == "image":
@@ -86,10 +95,12 @@ class ClipboardHistoryApp:
         self.popup = PopupWindow(self.root, self.db, self.paste_engine, self.monitor, prev_hwnd=prev_hwnd)
 
     def quit(self):
+        log.info("Shutting down...")
         self.monitor.stop()
         self.hotkey.stop()
         self.tray.stop()
         self.db.close()
+        ctypes.windll.kernel32.CloseHandle(_mutex)
         self.root.quit()
 
     def run(self):

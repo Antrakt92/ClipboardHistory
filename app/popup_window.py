@@ -480,6 +480,24 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._selected_index = max(0, min(self._selected_index, len(self._item_frames) - 1))
         self._item_frames[self._selected_index].configure(fg_color=SURFACE_SELECTED)
 
+        # Scroll selected item into view
+        try:
+            frame = self._item_frames[self._selected_index]
+            canvas = self.items_frame._parent_canvas
+            frame.update_idletasks()
+            canvas.update_idletasks()
+            fy = frame.winfo_y()
+            fh = frame.winfo_height()
+            canvas_h = canvas.winfo_height()
+            visible_top = canvas.canvasy(0)
+            visible_bottom = visible_top + canvas_h
+            if fy < visible_top:
+                canvas.yview_moveto(fy / canvas.bbox("all")[3])
+            elif fy + fh > visible_bottom:
+                canvas.yview_moveto((fy + fh - canvas_h) / canvas.bbox("all")[3])
+        except Exception:
+            pass
+
     def _paste_selected(self):
         if 0 <= self._selected_index < len(self._item_data):
             entry_id = self._item_data[self._selected_index]["id"]

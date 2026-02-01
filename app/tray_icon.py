@@ -17,6 +17,12 @@ class TrayIcon:
 
     def start(self):
         if not os.path.exists(ICON_PATH):
+            try:
+                from app.create_icon import create_icon
+                create_icon()
+            except Exception:
+                pass
+        if not os.path.exists(ICON_PATH):
             return
 
         image = Image.open(ICON_PATH)

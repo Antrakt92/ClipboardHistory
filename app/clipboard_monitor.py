@@ -119,7 +119,16 @@ class ClipboardMonitor:
     def _read_clipboard(self):
         try:
             import win32clipboard
-            win32clipboard.OpenClipboard()
+            import time as _time
+            # Retry OpenClipboard — another app may hold it briefly
+            for _attempt in range(3):
+                try:
+                    win32clipboard.OpenClipboard()
+                    break
+                except Exception:
+                    if _attempt == 2:
+                        return
+                    _time.sleep(0.05)
             try:
                 # Prefer text if available
                 if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):

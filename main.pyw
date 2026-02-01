@@ -6,6 +6,7 @@ Runs in system tray with no console window.
 import os
 import sys
 import ctypes
+import ctypes.wintypes
 import logging
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -19,8 +20,11 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # Single instance check via Named Mutex
-_mutex = ctypes.windll.kernel32.CreateMutexW(None, True, "ClipboardHistoryManager_SingleInstance")
-if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+_kernel32 = ctypes.windll.kernel32
+_kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
+_kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+_mutex = _kernel32.CreateMutexW(None, True, "ClipboardHistoryManager_SingleInstance")
+if _kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
     sys.exit(0)
 
 import customtkinter
@@ -130,7 +134,7 @@ class ClipboardHistoryApp:
     def quit(self):
         log.info("Shutting down...")
         self._stop_components()
-        ctypes.windll.kernel32.CloseHandle(_mutex)
+        _kernel32.CloseHandle(_mutex)
         self.root.quit()
 
     def run(self):

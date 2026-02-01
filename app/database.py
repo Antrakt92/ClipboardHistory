@@ -27,6 +27,8 @@ class Database:
         self._migrate()
         self._expire_old_entries()
         self._last_expire_time = time.time()
+        self._last_vacuum_time = time.time()
+        self._needs_vacuum = False
 
     @staticmethod
     def _open_or_recreate(db_path):
@@ -45,10 +47,11 @@ class Database:
                     conn.close()
                 except Exception:
                     pass
-            try:
-                os.remove(db_path)
-            except OSError:
-                pass
+            for path in (db_path, db_path + "-wal", db_path + "-shm"):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
             return sqlite3.connect(db_path, check_same_thread=False)
 
     def _create_tables(self):
@@ -123,7 +126,10 @@ class Database:
             self.conn.commit()
             self._cleanup_unlocked()
             self._maybe_expire_unlocked()
-            return True
+
+        # VACUUM outside the lock so it doesn't block get_history/UI
+        self._maybe_vacuum()
+        return True
 
     def _add_image_entry(self, image_data):
         if not image_data:
@@ -152,7 +158,10 @@ class Database:
             self.conn.commit()
             self._cleanup_unlocked()
             self._maybe_expire_unlocked()
-            return True
+
+        # VACUUM outside the lock so it doesn't block get_history/UI
+        self._maybe_vacuum()
+        return True
 
     def get_history(self, limit=50, offset=0, search_query=None):
         with self.lock:
@@ -251,6 +260,7 @@ class Database:
                 )
             """, (to_delete,))
             self.conn.commit()
+            self._needs_vacuum = True
 
     def _maybe_expire_unlocked(self):
         """Run expiration at most once per hour (called inside lock)."""
@@ -264,6 +274,24 @@ class Database:
             (cutoff,)
         )
         self.conn.commit()
+
+    def _maybe_vacuum(self):
+        """Run VACUUM at most once per day to reclaim space from deleted blobs.
+        Called OUTSIDE self.lock so it doesn't block get_history/UI."""
+        if not self._needs_vacuum:
+            return
+        now = time.time()
+        if now - self._last_vacuum_time < 86400:
+            return
+        self._needs_vacuum = False
+        self._last_vacuum_time = now
+        with self.lock:
+            if self._closed:
+                return
+            try:
+                self.conn.execute("VACUUM")
+            except Exception:
+                log.debug("VACUUM skipped", exc_info=True)
 
     def close(self):
         with self.lock:

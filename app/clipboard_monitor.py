@@ -23,6 +23,11 @@ user32.DefWindowProcW.argtypes = [
 ]
 user32.DefWindowProcW.restype = ctypes.wintypes.LPARAM  # LRESULT is pointer-sized (64-bit on x64)
 
+user32.AddClipboardFormatListener.argtypes = [ctypes.wintypes.HWND]
+user32.AddClipboardFormatListener.restype = ctypes.wintypes.BOOL
+user32.RemoveClipboardFormatListener.argtypes = [ctypes.wintypes.HWND]
+user32.RemoveClipboardFormatListener.restype = ctypes.wintypes.BOOL
+
 WM_CLIPBOARDUPDATE = 0x031D
 WM_DESTROY = 0x0002
 WM_QUIT = 0x0012
@@ -59,6 +64,7 @@ class ClipboardMonitor:
         self._ignore_lock = threading.Lock()
         self._ignore_next = False
         self._hwnd = None
+        self._thread_id = None
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._wndproc_ref = None  # prevent GC
@@ -69,8 +75,10 @@ class ClipboardMonitor:
     def stop(self, timeout=2):
         self._running.clear()
         self._ready.wait(timeout=1)  # ensure window is created before posting
-        if self._hwnd:
-            user32.PostMessageW(self._hwnd, WM_QUIT, 0, 0)
+        if self._thread_id:
+            # Post WM_QUIT to the thread message queue (not a window) so
+            # GetMessageW returns 0 and the message loop exits cleanly.
+            user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
         if self._thread.is_alive():
             self._thread.join(timeout)
 
@@ -83,6 +91,7 @@ class ClipboardMonitor:
             self._ignore_next = False
 
     def _run(self):
+        self._thread_id = kernel32.GetCurrentThreadId()
         hinstance = kernel32.GetModuleHandleW(None)
         class_name = "ClipboardHistoryMonitor"
 
@@ -197,7 +206,14 @@ class ClipboardMonitor:
             clr_used = struct.unpack_from('<I', dib_data, 32)[0]
             if clr_used == 0 and bit_count <= 8:
                 clr_used = 1 << bit_count
-            bf_off_bits = 14 + bi_size + clr_used * 4
+
+            # Account for BI_BITFIELDS color masks (3 DWORDs after header)
+            compression = struct.unpack_from('<I', dib_data, 16)[0]
+            masks_size = 0
+            if compression in (3, 6) and bi_size == 40:  # BI_BITFIELDS / BI_ALPHABITFIELDS with BITMAPINFOHEADER
+                masks_size = 12 if compression == 3 else 16
+
+            bf_off_bits = 14 + bi_size + masks_size + clr_used * 4
 
             bmp_header = b'BM'
             bmp_header += (len(dib_data) + 14).to_bytes(4, 'little')

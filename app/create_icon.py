@@ -39,6 +39,7 @@ def create_icon():
 
     img.save(ICON_PATH, "PNG")
     img.save(ICO_PATH, format="ICO", sizes=[(64, 64)])
+    img.close()
 
 
 if __name__ == "__main__":

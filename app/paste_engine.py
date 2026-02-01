@@ -22,13 +22,24 @@ class KEYBDINPUT(ctypes.Structure):
         ("wScan", ctypes.wintypes.WORD),
         ("dwFlags", ctypes.wintypes.DWORD),
         ("time", ctypes.wintypes.DWORD),
-        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ("dwExtraInfo", ctypes.c_void_p),
+    ]
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", ctypes.wintypes.LONG),
+        ("dy", ctypes.wintypes.LONG),
+        ("mouseData", ctypes.wintypes.DWORD),
+        ("dwFlags", ctypes.wintypes.DWORD),
+        ("time", ctypes.wintypes.DWORD),
+        ("dwExtraInfo", ctypes.c_void_p),
     ]
 
 
 class INPUT(ctypes.Structure):
     class _INPUT(ctypes.Union):
-        _fields_ = [("ki", KEYBDINPUT)]
+        _fields_ = [("ki", KEYBDINPUT), ("mi", MOUSEINPUT)]
     _fields_ = [
         ("type", ctypes.wintypes.DWORD),
         ("_input", _INPUT),

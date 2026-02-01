@@ -34,7 +34,9 @@ class Database:
         conn = None
         try:
             conn = sqlite3.connect(db_path, check_same_thread=False)
-            conn.execute("PRAGMA integrity_check")
+            result = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            if result != "ok":
+                raise sqlite3.DatabaseError(f"integrity check failed: {result}")
             return conn
         except sqlite3.DatabaseError:
             log.warning("Database corrupted, recreating: %s", db_path)
@@ -267,5 +269,9 @@ class Database:
         with self.lock:
             self._closed = True
             if self.conn:
+                try:
+                    self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                except Exception:
+                    pass
                 self.conn.close()
                 self.conn = None

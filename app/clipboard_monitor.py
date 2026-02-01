@@ -68,6 +68,7 @@ class ClipboardMonitor:
 
     def stop(self, timeout=2):
         self._running.clear()
+        self._ready.wait(timeout=1)  # ensure window is created before posting
         if self._hwnd:
             user32.PostMessageW(self._hwnd, WM_QUIT, 0, 0)
         if self._thread.is_alive():
@@ -97,10 +98,11 @@ class ClipboardMonitor:
             self._ready.set()
             return
 
+        HWND_MESSAGE = ctypes.wintypes.HWND(-3)
         self._hwnd = user32.CreateWindowExW(
             0, class_name, "ClipboardMonitorWindow",
             0, 0, 0, 0, 0,
-            None, None, hinstance, None
+            HWND_MESSAGE, None, hinstance, None
         )
 
         if not self._hwnd:

@@ -667,7 +667,7 @@ class PopupWindow(customtkinter.CTkToplevel):
             foreground = user32.GetForegroundWindow()
             try:
                 own_hwnd = int(self.wm_frame(), 16)
-                if foreground == own_hwnd:
+                if own_hwnd and foreground == own_hwnd:
                     return
             except Exception:
                 pass
@@ -675,7 +675,7 @@ class PopupWindow(customtkinter.CTkToplevel):
             if self._preview_window is not None:
                 try:
                     preview_hwnd = int(self._preview_window.wm_frame(), 16)
-                    if foreground == preview_hwnd:
+                    if preview_hwnd and foreground == preview_hwnd:
                         return
                 except Exception:
                     pass

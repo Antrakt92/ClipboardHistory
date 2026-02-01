@@ -14,6 +14,14 @@ _OLD_DB = os.path.join(APP_DIR, "clipboard_history.db")
 if os.path.exists(_OLD_DB) and not os.path.exists(DB_PATH):
     try:
         shutil.move(_OLD_DB, DB_PATH)
+        # Migrate WAL/SHM sidecar files to avoid data loss
+        for suffix in ("-wal", "-shm"):
+            old_sidecar = _OLD_DB + suffix
+            if os.path.exists(old_sidecar):
+                try:
+                    shutil.move(old_sidecar, DB_PATH + suffix)
+                except OSError:
+                    pass
     except OSError:
         pass
 

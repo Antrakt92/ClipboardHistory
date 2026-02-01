@@ -22,9 +22,11 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA busy_timeout=3000")
+        self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self._create_tables()
         self._migrate()
         self._expire_old_entries()
+        self._last_expire_time = time.time()
 
     @staticmethod
     def _open_or_recreate(db_path):
@@ -118,6 +120,7 @@ class Database:
             )
             self.conn.commit()
             self._cleanup_unlocked()
+            self._maybe_expire_unlocked()
             return True
 
     def _add_image_entry(self, image_data):
@@ -146,6 +149,7 @@ class Database:
             )
             self.conn.commit()
             self._cleanup_unlocked()
+            self._maybe_expire_unlocked()
             return True
 
     def get_history(self, limit=50, offset=0, search_query=None):
@@ -245,6 +249,19 @@ class Database:
                 )
             """, (to_delete,))
             self.conn.commit()
+
+    def _maybe_expire_unlocked(self):
+        """Run expiration at most once per hour (called inside lock)."""
+        now = time.time()
+        if now - self._last_expire_time < 3600:
+            return
+        self._last_expire_time = now
+        cutoff = now - AUTO_EXPIRE_DAYS * 86400
+        self.conn.execute(
+            "DELETE FROM clipboard_history WHERE pinned = 0 AND timestamp < ?",
+            (cutoff,)
+        )
+        self.conn.commit()
 
     def close(self):
         with self.lock:

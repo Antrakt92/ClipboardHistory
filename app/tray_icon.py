@@ -30,6 +30,7 @@ class TrayIcon:
             return
 
         image = Image.open(ICON_PATH)
+        image.load()  # read pixels into memory so file handle is released
         self.icon = pystray.Icon(
             APP_NAME,
             icon=image,

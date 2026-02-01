@@ -134,31 +134,32 @@ class ClipboardMonitor:
                     if _attempt == 2:
                         return
                     _time.sleep(0.05)
-            result_content = None
-            result_type = None
+            text_content = None
+            raw_dib = None
             try:
                 # Prefer text if available
                 if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
                     content = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
                     if content and content.strip():
-                        result_content = content
-                        result_type = "text"
+                        text_content = content
 
                 # Check for image (CF_DIB) if no text
-                if result_content is None:
+                if text_content is None:
                     CF_DIB = 8
                     if win32clipboard.IsClipboardFormatAvailable(CF_DIB):
                         dib_data = win32clipboard.GetClipboardData(CF_DIB)
                         if dib_data and len(dib_data) <= MAX_IMAGE_BYTES:
-                            png_bytes = self._dib_to_png(dib_data)
-                            if png_bytes:
-                                result_content = png_bytes
-                                result_type = "image"
+                            raw_dib = bytes(dib_data)
             finally:
                 win32clipboard.CloseClipboard()
 
-            if result_content is not None:
-                self.on_new_content(result_content, result_type)
+            # Process outside clipboard lock
+            if text_content:
+                self.on_new_content(text_content, "text")
+            elif raw_dib:
+                png_bytes = self._dib_to_png(raw_dib)
+                if png_bytes:
+                    self.on_new_content(png_bytes, "image")
         except Exception:
             pass
 

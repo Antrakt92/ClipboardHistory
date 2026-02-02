@@ -217,6 +217,8 @@ class Database:
                 "DELETE FROM clipboard_history WHERE id = ?", (entry_id,)
             )
             self.conn.commit()
+            self._needs_vacuum = True
+        self._maybe_vacuum()
 
     def toggle_pin(self, entry_id):
         with self.lock:
@@ -236,6 +238,8 @@ class Database:
                 "DELETE FROM clipboard_history WHERE pinned = 0"
             )
             self.conn.commit()
+            self._needs_vacuum = True
+        self._maybe_vacuum()
 
     def _cleanup_unlocked(self):
         count = self.conn.execute(

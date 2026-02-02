@@ -67,6 +67,9 @@ class ClipboardHistoryApp:
             self.monitor = ClipboardMonitor(on_new_content=self._on_clipboard_change)
             self.monitor.start()
 
+            # Create popup once (hidden) — reused on every hotkey press
+            self.popup = PopupWindow(self.root, self.db, self.paste_engine, self.monitor)
+
             self.hotkey = HotkeyManager(on_activate=self._on_hotkey)
             self.hotkey.start()
 
@@ -104,17 +107,12 @@ class ClipboardHistoryApp:
         self.root.after(0, lambda: self.show_popup(hwnd))
 
     def show_popup(self, prev_hwnd=None):
-        if self.popup is not None:
-            try:
-                if self.popup.winfo_exists() and not self.popup._closed:
-                    if prev_hwnd:
-                        self.popup._prev_hwnd = prev_hwnd
-                    self.popup.focus()
-                    return
-            except Exception:
-                pass
-            self.popup = None
-        self.popup = PopupWindow(self.root, self.db, self.paste_engine, self.monitor, prev_hwnd=prev_hwnd)
+        if self.popup is None:
+            return
+        if self.popup.is_visible:
+            self.popup.focus()
+            return
+        self.popup.show(prev_hwnd)
 
     def _stop_components(self):
         """Stop all started components safely (used by quit and init-failure cleanup)."""

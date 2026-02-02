@@ -28,6 +28,22 @@ user32.AddClipboardFormatListener.restype = ctypes.wintypes.BOOL
 user32.RemoveClipboardFormatListener.argtypes = [ctypes.wintypes.HWND]
 user32.RemoveClipboardFormatListener.restype = ctypes.wintypes.BOOL
 
+# Fix restype for functions returning pointer-sized values (default c_int truncates on x64)
+kernel32.GetModuleHandleW.argtypes = [ctypes.wintypes.LPCWSTR]
+kernel32.GetModuleHandleW.restype = ctypes.wintypes.HMODULE
+user32.CreateWindowExW.argtypes = [
+    ctypes.wintypes.DWORD, ctypes.wintypes.LPCWSTR, ctypes.wintypes.LPCWSTR,
+    ctypes.wintypes.DWORD, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    ctypes.wintypes.HWND, ctypes.wintypes.HANDLE, ctypes.wintypes.HINSTANCE, ctypes.c_void_p,
+]
+user32.CreateWindowExW.restype = ctypes.wintypes.HWND
+user32.DestroyWindow.argtypes = [ctypes.wintypes.HWND]
+user32.DestroyWindow.restype = ctypes.wintypes.BOOL
+user32.RegisterClassW.argtypes = [ctypes.c_void_p]
+user32.RegisterClassW.restype = ctypes.wintypes.ATOM
+user32.UnregisterClassW.argtypes = [ctypes.wintypes.LPCWSTR, ctypes.wintypes.HINSTANCE]
+user32.UnregisterClassW.restype = ctypes.wintypes.BOOL
+
 WM_CLIPBOARDUPDATE = 0x031D
 WM_DESTROY = 0x0002
 WM_QUIT = 0x0012

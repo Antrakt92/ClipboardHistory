@@ -1,9 +1,12 @@
 """Generate app icon (clipboard) as PNG and ICO."""
+import logging
 import os
 
 from PIL import Image, ImageDraw
 
 from app.config import ICON_PATH, ICO_PATH
+
+log = logging.getLogger(__name__)
 
 
 def create_icon():
@@ -37,9 +40,14 @@ def create_icon():
             radius=1, fill="#7c83ff"
         )
 
-    img.save(ICON_PATH, "PNG")
-    img.save(ICO_PATH, format="ICO", sizes=[(64, 64)])
-    img.close()
+    try:
+        img.save(ICON_PATH, "PNG")
+        img.save(ICO_PATH, format="ICO", sizes=[(64, 64)])
+    except OSError:
+        log.warning("Failed to save icon files to %s", os.path.dirname(ICON_PATH), exc_info=True)
+        raise
+    finally:
+        img.close()
 
 
 if __name__ == "__main__":

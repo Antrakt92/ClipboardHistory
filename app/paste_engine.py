@@ -138,13 +138,14 @@ class PasteEngine:
         try:
             from PIL import Image
 
-            img = Image.open(io.BytesIO(png_bytes))
-            try:
-                buf = io.BytesIO()
-                img.save(buf, format="BMP")
-                bmp_data = buf.getvalue()
-            finally:
-                img.close()
+            with io.BytesIO(png_bytes) as src_buf:
+                img = Image.open(src_buf)
+                try:
+                    with io.BytesIO() as buf:
+                        img.save(buf, format="BMP")
+                        bmp_data = buf.getvalue()
+                finally:
+                    img.close()
             dib_data = bmp_data[14:]
 
             if not _open_clipboard_retry():

@@ -216,8 +216,17 @@ class ClipboardMonitor:
     @staticmethod
     def _dib_to_png(dib_data):
         try:
+            # BITMAPINFOHEADER is 40 bytes minimum; we read up to offset 35
+            if len(dib_data) < 40:
+                log.debug("DIB data too short (%d bytes), skipping", len(dib_data))
+                return None
+
             # Calculate correct pixel data offset from DIB header
             bi_size = struct.unpack_from('<I', dib_data, 0)[0]
+            if bi_size < 40:
+                log.debug("Invalid DIB header size %d, skipping", bi_size)
+                return None
+
             bit_count = struct.unpack_from('<H', dib_data, 14)[0]
             clr_used = struct.unpack_from('<I', dib_data, 32)[0]
             if clr_used == 0 and bit_count <= 8:
@@ -236,13 +245,14 @@ class ClipboardMonitor:
             bmp_header += b'\x00\x00\x00\x00'
             bmp_header += bf_off_bits.to_bytes(4, 'little')
 
-            img = Image.open(io.BytesIO(bmp_header + dib_data))
-            try:
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                return buf.getvalue()
-            finally:
-                img.close()
+            with io.BytesIO(bmp_header + dib_data) as src_buf:
+                img = Image.open(src_buf)
+                try:
+                    with io.BytesIO() as buf:
+                        img.save(buf, format="PNG")
+                        return buf.getvalue()
+                finally:
+                    img.close()
         except Exception:
             log.debug("Failed to convert DIB to PNG", exc_info=True)
             return None

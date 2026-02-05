@@ -1,5 +1,8 @@
+import logging
 import os
 import shutil
+
+_log = logging.getLogger(__name__)
 
 APP_NAME = "ClipboardHistory"
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -14,6 +17,7 @@ _OLD_DB = os.path.join(APP_DIR, "clipboard_history.db")
 if os.path.exists(_OLD_DB) and not os.path.exists(DB_PATH):
     try:
         shutil.move(_OLD_DB, DB_PATH)
+        _log.info("Migrated database from %s to %s", _OLD_DB, DB_PATH)
         # Migrate WAL/SHM sidecar files to avoid data loss
         for suffix in ("-wal", "-shm"):
             old_sidecar = _OLD_DB + suffix
@@ -21,9 +25,9 @@ if os.path.exists(_OLD_DB) and not os.path.exists(DB_PATH):
                 try:
                     shutil.move(old_sidecar, DB_PATH + suffix)
                 except OSError:
-                    pass
+                    _log.warning("Failed to migrate sidecar file %s", old_sidecar, exc_info=True)
     except OSError:
-        pass
+        _log.error("Failed to migrate database from %s to %s", _OLD_DB, DB_PATH, exc_info=True)
 
 ICON_PATH = os.path.join(APP_DIR, "app", "assets", "icon.png")
 ICO_PATH = os.path.join(APP_DIR, "app", "assets", "icon.ico")

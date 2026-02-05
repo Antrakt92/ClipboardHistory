@@ -799,6 +799,14 @@ class PopupWindow(customtkinter.CTkToplevel):
             self.after_cancel(self._focus_check_id)
         self._focus_check_id = self.after(80, lambda: self._check_focus(0))
 
+    @staticmethod
+    def _get_tk_hwnd(widget):
+        """Get native window handle for a Tk widget, or 0 on failure."""
+        try:
+            return widget.winfo_id()
+        except Exception:
+            return 0
+
     def _check_focus(self, attempt):
         self._focus_check_id = None
         if not self._visible:
@@ -815,19 +823,13 @@ class PopupWindow(customtkinter.CTkToplevel):
                 except Exception:
                     pass
             foreground = user32.GetForegroundWindow()
-            try:
-                own_hwnd = int(self.wm_frame(), 16)
-                if own_hwnd and foreground == own_hwnd:
-                    return
-            except Exception:
-                pass
+            own_hwnd = self._get_tk_hwnd(self)
+            if own_hwnd and foreground == own_hwnd:
+                return
             if self._preview_window is not None:
-                try:
-                    preview_hwnd = int(self._preview_window.wm_frame(), 16)
-                    if preview_hwnd and foreground == preview_hwnd:
-                        return
-                except Exception:
-                    pass
+                preview_hwnd = self._get_tk_hwnd(self._preview_window)
+                if preview_hwnd and foreground == preview_hwnd:
+                    return
             if attempt < 1:
                 self.after(80, lambda: self._check_focus(attempt + 1))
                 return

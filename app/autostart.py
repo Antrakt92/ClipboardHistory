@@ -1,8 +1,11 @@
+import logging
 import os
 import sys
 import winreg
 
 from app.config import AUTOSTART_KEY, AUTOSTART_NAME, SCRIPT_PATH
+
+log = logging.getLogger(__name__)
 
 
 def _get_pythonw_path():
@@ -28,16 +31,22 @@ def enable_autostart():
         cmd = f'"{pythonw}" "{SCRIPT_PATH}"'
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
             winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
+        return True
     except OSError:
-        pass
+        log.warning("Failed to enable autostart", exc_info=True)
+        return False
 
 
 def disable_autostart():
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY, 0, winreg.KEY_SET_VALUE) as key:
             winreg.DeleteValue(key, AUTOSTART_NAME)
-    except (FileNotFoundError, OSError):
-        pass
+        return True
+    except FileNotFoundError:
+        return True  # already absent — success
+    except OSError:
+        log.warning("Failed to disable autostart", exc_info=True)
+        return False
 
 
 def toggle_autostart():

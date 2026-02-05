@@ -24,7 +24,7 @@ class TrayIcon:
                 from app.create_icon import create_icon
                 create_icon()
             except Exception:
-                pass
+                log.warning("Failed to generate icon file", exc_info=True)
         if not os.path.exists(ICON_PATH):
             log.warning("Tray icon file not found at %s — tray will not be shown", ICON_PATH)
             return
@@ -54,4 +54,4 @@ class TrayIcon:
             try:
                 self.icon.stop()
             except Exception:
-                pass
+                log.debug("Error stopping tray icon", exc_info=True)

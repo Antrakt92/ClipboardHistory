@@ -292,8 +292,6 @@ class PopupWindow(customtkinter.CTkToplevel):
         self.search_entry.bind("<KeyRelease>", self._on_search_change)
 
         # Scrollable list — plain tk Canvas + Frame (much faster than CTkScrollableFrame)
-        list_container = tk.Frame(c._canvas if hasattr(c, '_canvas') else c, bg=BG)
-        # Use the CTk frame's internal tk widget as parent
         list_container = tk.Frame(self._border_frame, bg=BG)
         list_container.pack(fill="both", expand=True, padx=6, pady=(2, 2))
 
@@ -743,20 +741,22 @@ class PopupWindow(customtkinter.CTkToplevel):
             self._toggle_pin(entry_id)
 
     def _on_item_click(self, entry_id):
+        if not self._visible:
+            return
         entry = self.db.get_entry(entry_id)
         if not entry:
             return
+
+        self.db.touch_entry(entry_id)
 
         prev_hwnd = self._prev_hwnd
         content = entry["content"]
         content_type = entry.get("content_type", "text")
         image_data = entry.get("image_data") if content_type == "image" else None
-        monitor = self.monitor
-        paste_engine = self.paste_engine
 
         self.close()
 
-        paste_engine.paste(content, content_type, prev_hwnd, monitor, image_data=image_data)
+        self.paste_engine.paste(content, content_type, prev_hwnd, self.monitor, image_data=image_data)
 
     def _toggle_pin(self, entry_id):
         self.db.toggle_pin(entry_id)

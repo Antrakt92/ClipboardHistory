@@ -1,3 +1,4 @@
+import io
 import logging
 import os
 import threading
@@ -29,8 +30,9 @@ class TrayIcon:
             log.warning("Tray icon file not found at %s — tray will not be shown", ICON_PATH)
             return
 
-        image = Image.open(ICON_PATH)
-        image.load()  # read pixels into memory so file handle is released
+        with open(ICON_PATH, "rb") as f:
+            image = Image.open(io.BytesIO(f.read()))
+        image.load()
         self.icon = pystray.Icon(
             APP_NAME,
             icon=image,

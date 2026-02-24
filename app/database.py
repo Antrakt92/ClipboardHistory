@@ -82,9 +82,14 @@ class Database:
         with self.lock:
             cursor = self.conn.execute("PRAGMA table_info(clipboard_history)")
             columns = {row["name"] for row in cursor.fetchall()}
+            added = False
             if "image_data" not in columns:
                 self.conn.execute("ALTER TABLE clipboard_history ADD COLUMN image_data BLOB")
+                added = True
+            if "image_hash" not in columns:
                 self.conn.execute("ALTER TABLE clipboard_history ADD COLUMN image_hash TEXT")
+                added = True
+            if added:
                 self.conn.commit()
 
     def _expire_old_entries(self):
@@ -125,7 +130,7 @@ class Database:
             )
             self.conn.commit()
             self._cleanup_unlocked()
-            self._maybe_expire_unlocked()
+            self._maybe_expire()
 
         # VACUUM outside the lock so it doesn't block get_history/UI
         self._maybe_vacuum()
@@ -157,7 +162,7 @@ class Database:
             )
             self.conn.commit()
             self._cleanup_unlocked()
-            self._maybe_expire_unlocked()
+            self._maybe_expire()
 
         # VACUUM outside the lock so it doesn't block get_history/UI
         self._maybe_vacuum()
@@ -220,6 +225,16 @@ class Database:
             self._needs_vacuum = True
         self._maybe_vacuum()
 
+    def touch_entry(self, entry_id):
+        with self.lock:
+            if self._closed:
+                return
+            self.conn.execute(
+                "UPDATE clipboard_history SET timestamp = ? WHERE id = ?",
+                (time.time(), entry_id)
+            )
+            self.conn.commit()
+
     def toggle_pin(self, entry_id):
         with self.lock:
             if self._closed:
@@ -266,7 +281,7 @@ class Database:
             self.conn.commit()
             self._needs_vacuum = True
 
-    def _maybe_expire_unlocked(self):
+    def _maybe_expire(self):
         """Run expiration at most once per hour (called inside lock)."""
         now = time.time()
         if now - self._last_expire_time < 3600:

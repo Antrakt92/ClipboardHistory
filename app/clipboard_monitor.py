@@ -148,7 +148,6 @@ class ClipboardMonitor:
 
         user32.RemoveClipboardFormatListener(self._hwnd)
         user32.DestroyWindow(self._hwnd)
-        hinstance = kernel32.GetModuleHandleW(None)
         user32.UnregisterClassW("ClipboardHistoryMonitor", hinstance)
 
     def _wnd_proc(self, hwnd, msg, wparam, lparam):

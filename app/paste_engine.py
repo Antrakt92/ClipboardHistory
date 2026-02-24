@@ -109,7 +109,7 @@ class PasteEngine:
             result = user32.SetForegroundWindow(target_hwnd)
             if not result:
                 log.warning("SetForegroundWindow failed for hwnd %s", target_hwnd)
-            time.sleep(0.15)
+        time.sleep(0.15)
 
         # Ctrl+V via SendInput (more reliable than deprecated keybd_event)
         inputs = (INPUT * 4)(

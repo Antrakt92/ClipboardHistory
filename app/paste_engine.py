@@ -5,8 +5,10 @@ import logging
 import threading
 import time
 import win32clipboard
+from dataclasses import dataclass
 
 user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
 
 # Fix prototypes for x64 safety (default restype c_int truncates pointer-sized HWND)
 user32.IsWindow.argtypes = [ctypes.wintypes.HWND]
@@ -15,15 +17,38 @@ user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
 user32.SetForegroundWindow.restype = ctypes.wintypes.BOOL
 user32.SendInput.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_int]
 user32.SendInput.restype = ctypes.c_uint
+kernel32.GetLastError.restype = ctypes.wintypes.DWORD
 
 log = logging.getLogger(__name__)
 
+EXPECTED_INPUT_COUNT = 4
 VK_CONTROL = 0x11
 VK_V = 0x56
 SCAN_CONTROL = 0x1D
 SCAN_V = 0x2F
 KEYEVENTF_KEYUP = 0x0002
 INPUT_KEYBOARD = 1
+
+
+@dataclass(frozen=True)
+class PasteStartResult:
+    clipboard_set: bool
+    started: bool
+    content_type: str
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class PasteCompletion:
+    target_hwnd: int | None
+    target_valid: bool
+    focus_attempted: bool
+    focus_succeeded: bool | None
+    focus_error: int | None
+    send_input_count: int
+    expected_input_count: int
+    send_error: int | None
+    success: bool
 
 
 class KEYBDINPUT(ctypes.Structure):
@@ -70,7 +95,18 @@ def _open_clipboard_retry(attempts=3, delay=0.05):
 
 
 class PasteEngine:
-    def paste(self, content, content_type="text", target_hwnd=None, monitor=None, image_data=None):
+    def __init__(self, thread_factory=None):
+        self._thread_factory = thread_factory or threading.Thread
+
+    def paste(
+        self,
+        content,
+        content_type="text",
+        target_hwnd=None,
+        monitor=None,
+        image_data=None,
+        on_complete=None,
+    ):
         """Set clipboard and send Ctrl+V. Runs blocking part in a background thread."""
         # Set ignore BEFORE clipboard write to avoid race condition:
         # the monitor thread could process WM_CLIPBOARDUPDATE before
@@ -88,12 +124,32 @@ class PasteEngine:
             # Reset ignore flag since clipboard write failed
             if monitor:
                 monitor.clear_ignore()
-            return
+            return PasteStartResult(
+                clipboard_set=False,
+                started=False,
+                content_type=content_type,
+                reason="clipboard_write_failed",
+            )
 
         # Run focus + keypress in a thread to avoid blocking Tk main loop
-        threading.Thread(
-            target=self._focus_and_press, args=(target_hwnd,), daemon=True
+        self._thread_factory(
+            target=self._run_paste_worker,
+            args=(target_hwnd, on_complete),
+            daemon=True,
         ).start()
+        return PasteStartResult(
+            clipboard_set=True,
+            started=True,
+            content_type=content_type,
+        )
+
+    def _run_paste_worker(self, target_hwnd, on_complete):
+        completion = self._focus_and_press(target_hwnd)
+        if on_complete:
+            try:
+                on_complete(completion)
+            except Exception:
+                log.exception("Paste completion callback failed")
 
     @staticmethod
     def _make_key_input(vk, scan, flags=0):
@@ -105,20 +161,58 @@ class PasteEngine:
         return inp
 
     def _focus_and_press(self, target_hwnd):
-        if target_hwnd and user32.IsWindow(target_hwnd):
+        target_valid = bool(target_hwnd and user32.IsWindow(target_hwnd))
+        focus_attempted = False
+        focus_succeeded = None
+        focus_error = None
+
+        if target_valid:
+            focus_attempted = True
             result = user32.SetForegroundWindow(target_hwnd)
+            focus_succeeded = bool(result)
             if not result:
-                log.warning("SetForegroundWindow failed for hwnd %s", target_hwnd)
+                focus_error = kernel32.GetLastError()
+                log.warning(
+                    "SetForegroundWindow failed for hwnd %s, error=%s",
+                    target_hwnd,
+                    focus_error,
+                )
         time.sleep(0.15)
 
         # Ctrl+V via SendInput (more reliable than deprecated keybd_event)
-        inputs = (INPUT * 4)(
+        inputs = (INPUT * EXPECTED_INPUT_COUNT)(
             self._make_key_input(VK_CONTROL, SCAN_CONTROL),
             self._make_key_input(VK_V, SCAN_V),
             self._make_key_input(VK_V, SCAN_V, KEYEVENTF_KEYUP),
             self._make_key_input(VK_CONTROL, SCAN_CONTROL, KEYEVENTF_KEYUP),
         )
-        user32.SendInput(4, ctypes.byref(inputs), ctypes.sizeof(INPUT))
+        sent = user32.SendInput(
+            EXPECTED_INPUT_COUNT,
+            ctypes.byref(inputs),
+            ctypes.sizeof(INPUT),
+        )
+        success = sent == EXPECTED_INPUT_COUNT
+        send_error = None
+        if not success:
+            send_error = kernel32.GetLastError()
+            log.warning(
+                "SendInput sent %s/%s events, error=%s",
+                sent,
+                EXPECTED_INPUT_COUNT,
+                send_error,
+            )
+
+        return PasteCompletion(
+            target_hwnd=target_hwnd,
+            target_valid=target_valid,
+            focus_attempted=focus_attempted,
+            focus_succeeded=focus_succeeded,
+            focus_error=focus_error,
+            send_input_count=sent,
+            expected_input_count=EXPECTED_INPUT_COUNT,
+            send_error=send_error,
+            success=success,
+        )
 
     def _set_clipboard_text(self, content):
         try:

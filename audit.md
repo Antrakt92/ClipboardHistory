@@ -6,7 +6,7 @@
 
 ## Текущий фокус
 
-1. Сделать Win32/paste failures видимыми, логируемыми и проверяемыми, чтобы приложение не выглядело рабочим при сломанном listener/hotkey/paste.
+1. Сделать Win32 listener/hotkey/clipboard retry failures видимыми, логируемыми и проверяемыми, чтобы приложение не выглядело рабочим при сломанном listener/hotkey.
 2. Укрепить UX вокруг destructive actions, file clipboard и truncated text.
 3. Добавить privacy controls для clipboard manager сценариев.
 4. Продолжить вынос чистой логики в тестируемые helpers без лишних дубликатов.
@@ -25,19 +25,6 @@
 - Пробросить compact status наверх: hotkey unavailable, clipboard listener unavailable.
 - Отобразить status в tray menu/title или popup без тяжелого UX.
 - Решить, нужен ли retry/backoff для listener registration.
-
-### CH-AUDIT-012 - Paste считается использованным до фактического успеха
-
-Приоритет: P2.
-
-`PopupWindow._on_item_click()` вызывает `touch_entry()` до `paste(...)`. `PasteEngine._focus_and_press()` вызывает `SendInput(...)`, но не проверяет возвращенное количество input events. `paste()` не возвращает success/failure наверх.
-
-Что сделать:
-- Сделать paste pipeline возвращающим результат хотя бы для clipboard write и `SendInput` count.
-- Проверять, что `SendInput()` вернул `4`; иначе логировать `GetLastError()`.
-- Не делать `touch_entry()` до подтвержденного paste attempt.
-- Показать compact failure state, если paste не удалось.
-- Продумать elevated apps/UAC/secure desktop как expected failure scenarios.
 
 ### CH-AUDIT-013 - Clipboard read silently drops events при занятом clipboard
 
@@ -104,10 +91,9 @@ Long text хранит `original_content_len` и `truncated`, но `content` о�
 
 Приоритет: P3.
 
-Storage, image helper logic, popup preview positioning и autostart command handling уже имеют базовые `unittest` tests, но остаются нетестированными paste result flow, hotkey/listener status и clipboard retry policy.
+Storage, image helper logic, popup preview positioning, autostart command handling и paste result flow уже имеют базовые `unittest` tests, но остаются нетестированными hotkey/listener status и clipboard retry policy.
 
 Что сделать:
-- Для paste/status flow добавить тестируемые result objects без реального `SendInput`.
 - Для Win32 clipboard оставить manual smoke checklist, если автоматизация окажется слишком тяжелой.
 
 ## Проверки для будущих правок
@@ -119,9 +105,9 @@ Storage, image helper logic, popup preview positioning и autostart command hand
 
 ## Сводка для следующей сессии
 
-1. Paste result flow и visible status foundation (`CH-AUDIT-012`, затем `CH-AUDIT-007`).
+1. Visible listener/hotkey status foundation (`CH-AUDIT-007`).
 2. Clipboard retry/status (`CH-AUDIT-013`).
 3. Clear semantics/privacy controls (`CH-AUDIT-022`, `CH-AUDIT-009`).
 4. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
 5. Truncated long-text policy (`CH-AUDIT-018`).
-6. Дополнительные tests (`CH-AUDIT-008`).
+6. Дополнительные tests для hotkey/listener и clipboard retry (`CH-AUDIT-008`).

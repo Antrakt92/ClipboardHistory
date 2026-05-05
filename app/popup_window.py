@@ -2,6 +2,7 @@ import customtkinter
 import ctypes
 import ctypes.wintypes
 import io
+import logging
 import tkinter as tk
 import time
 
@@ -16,6 +17,7 @@ from app.config import (
 )
 
 user32 = ctypes.windll.user32
+log = logging.getLogger(__name__)
 
 # Fix ctypes prototypes for by-value struct and correct return types
 user32.MonitorFromPoint.argtypes = [ctypes.wintypes.POINT, ctypes.wintypes.DWORD]
@@ -875,8 +877,6 @@ class PopupWindow(customtkinter.CTkToplevel):
         if not entry:
             return
 
-        self.db.touch_entry(entry_id)
-
         prev_hwnd = self._prev_hwnd
         content = entry["content"]
         content_type = entry.get("content_type", "text")
@@ -884,7 +884,40 @@ class PopupWindow(customtkinter.CTkToplevel):
 
         self.close()
 
-        self.paste_engine.paste(content, content_type, prev_hwnd, self.monitor, image_data=image_data)
+        start_result = self.paste_engine.paste(
+            content,
+            content_type,
+            prev_hwnd,
+            self.monitor,
+            image_data=image_data,
+            on_complete=lambda completion: self._schedule_paste_completion(
+                entry_id,
+                completion,
+            ),
+        )
+        if not start_result.started:
+            log.warning(
+                "Paste did not start for entry %s: %s",
+                entry_id,
+                start_result.reason,
+            )
+
+    def _schedule_paste_completion(self, entry_id, completion):
+        try:
+            self.after(0, lambda: self._handle_paste_completion(entry_id, completion))
+        except Exception:
+            log.exception("Failed to schedule paste completion for entry %s", entry_id)
+
+    def _handle_paste_completion(self, entry_id, completion):
+        if completion.success:
+            self.db.touch_entry(entry_id)
+        else:
+            log.warning(
+                "Paste attempt failed for entry %s: sent %s/%s input events",
+                entry_id,
+                completion.send_input_count,
+                completion.expected_input_count,
+            )
 
     def _toggle_pin(self, entry_id):
         self.db.toggle_pin(entry_id)

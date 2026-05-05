@@ -21,6 +21,9 @@
 - `python -m ruff check .` - проходит.
 - Smoke-проверка `Database(temp_path)` на свежем файле - падает с `sqlite3.OperationalError: database table is locked`; это подтверждает находку CH-AUDIT-001.
 - Расчет raw DIB размеров для типовых скриншотов подтверждает, что 1080p+ скриншоты превышают текущий 5 MiB лимит до PNG-конвертации; это подтверждает CH-AUDIT-003.
+- Deep probe с объектом `Database`, созданным в обход текущего startup-багa, подтвердил silent truncation + false dedup для разных текстов длиннее `MAX_CONTENT_LENGTH`; это подтверждает CH-AUDIT-011.
+- Static/order probe подтвердил, что `touch_entry()` вызывается до paste, а результат `SendInput()` игнорируется; это подтверждает CH-AUDIT-012.
+- Probe `_maybe_vacuum()` с failing connection подтвердил, что retry flag сбрасывается до успешного `VACUUM`; это подтверждает CH-AUDIT-014.
 
 ## Критичные и высокие находки
 
@@ -65,6 +68,21 @@
 - Разделить лимит на raw input safety limit и stored PNG limit.
 - Конвертировать DIB в PNG, затем проверять размер сохраняемого PNG.
 - Для защиты памяти добавить отдельный лимит по пикселям или более высокий raw limit с логированием причины пропуска.
+
+### CH-AUDIT-011 - Длинный текст тихо обрезается и может ложно дедуплицироваться
+
+Статус: подтверждено локальным probe после обхода CH-AUDIT-001.
+Приоритет: P1.
+
+`Database.add_entry()` сначала делает `content = content[:MAX_CONTENT_LENGTH]`, а уже потом сравнивает запись с последним элементом (`app/database.py:114-125`). Probe с двумя разными строками длиной `MAX_CONTENT_LENGTH + 1`, где различается только последний символ, дал `add a True`, `add b False`, `rows 1`, `stored_len 50000`.
+
+Пользовательский эффект: если пользователь копирует большой текст, приложение без предупреждения сохранит только первые 50k символов. Если затем скопировать другой большой текст с тем же первым 50k-префиксом, он вообще не попадет в историю как "duplicate". При paste из истории пользователь получит неполные данные, хотя UI не показывает, что запись была усечена.
+
+Рекомендуемое исправление:
+- Хранить `original_content_len` и `truncated` flag.
+- Делать dedup по hash исходного content до truncation или хранить hash отдельно.
+- Показывать в UI явный индикатор truncated content и не обещать paste полной записи, если она была обрезана.
+- Рассмотреть повышение лимита или настройку лимита для power users.
 
 ## Средние находки
 
@@ -123,6 +141,34 @@
 - В tray menu/title или popup показывать compact status для "hotkey unavailable" и "clipboard listener unavailable".
 - Добавить retry/backoff для listener registration, если это безопасно.
 
+### CH-AUDIT-012 - Paste считается использованным до фактического успеха, а `SendInput` failure игнорируется
+
+Статус: подтверждено по порядку вызовов.
+Приоритет: P2.
+
+`PopupWindow._on_item_click()` вызывает `self.db.touch_entry(entry_id)` до `self.paste_engine.paste(...)` (`app/popup_window.py:743-759`). При этом `PasteEngine._focus_and_press()` вызывает `user32.SendInput(...)`, но не проверяет возвращенное количество вставленных input events (`app/paste_engine.py:107-121`). `paste()` также не возвращает success/failure наверх.
+
+Пользовательский эффект: запись двигается наверх как использованная даже если clipboard write, foreground switch или actual `Ctrl+V` не сработали. Для elevated apps, secure desktops, UAC prompts, blocked focus changes или любых SendInput failures пользователь видит "история сработала", но paste мог не произойти.
+
+Рекомендуемое исправление:
+- Сделать paste pipeline возвращающим результат хотя бы для clipboard write и `SendInput` count.
+- Проверять, что `SendInput()` вернул `4`; если нет, логировать `GetLastError()` и показывать compact failure state.
+- Вызывать `touch_entry()` после подтвержденного paste attempt или хранить отдельное `last_selected_at` вместо перемещения по timestamp.
+
+### CH-AUDIT-013 - Clipboard read silently drops events, если clipboard занят дольше примерно 100 ms
+
+Статус: подтверждено по коду retry loop.
+Приоритет: P2.
+
+`ClipboardMonitor._read_clipboard()` делает 3 попытки `OpenClipboard()` с двумя паузами по 50 ms и на третьей ошибке просто `return` без логирования и без deferred retry (`app/clipboard_monitor.py:164-173`). Это отличается от paste-side `_open_clipboard_retry()`, где хотя бы пишется warning (`app/paste_engine.py:59-69`).
+
+Пользовательский эффект: некоторые clipboard updates будут потеряны полностью, если источник или другое приложение держит clipboard чуть дольше. Такое бывает при больших изображениях, Office/Adobe apps, remote desktop, clipboard sync tools. Пользователь не увидит ошибку и может думать, что история ненадежна случайным образом.
+
+Рекомендуемое исправление:
+- Логировать final failure с throttling, чтобы не зашумлять логи.
+- Добавить deferred retry через короткий timer/backoff, пока update еще актуален.
+- Рассмотреть сохранение "missed clipboard update" status в tray/popup diagnostics.
+
 ## Низкоприоритетные проблемы и улучшения
 
 ### CH-AUDIT-008 - Нет тестового каркаса для критичной логики
@@ -160,6 +206,47 @@
 
 Рекомендуемое исправление: удалить при ближайшем touching этих файлов, чтобы не делать отдельный шумный commit.
 
+### CH-AUDIT-014 - `VACUUM` retry flag сбрасывается до успешного выполнения
+
+Статус: подтверждено локальным probe с failing connection.
+Приоритет: P3.
+
+`Database._maybe_vacuum()` делает `self._needs_vacuum = False` до входа в lock и до `self.conn.execute("VACUUM")` (`app/database.py:297-313`). Если `VACUUM` не выполнится, exception логируется как debug, но `_needs_vacuum` уже потерян. Probe с connection, где `execute("VACUUM")` бросает exception, завершился `needs_vacuum_after False`.
+
+Пользовательский эффект: после удаления image blobs база может не уменьшиться и больше не попробует reclaim space до следующего delete/cleanup, который снова выставит `_needs_vacuum = True`.
+
+Рекомендуемое исправление:
+- Сбрасывать `_needs_vacuum` только после успешного `VACUUM`.
+- При ошибке оставлять flag включенным, но обновлять `_last_vacuum_time`, чтобы не retry-ить слишком часто.
+
+### CH-AUDIT-015 - Corruption recovery может вернуть все еще corrupt DB, если удаление файла не удалось
+
+Статус: подтверждено по коду recovery path.
+Приоритет: P2.
+
+В `_open_or_recreate()` при `sqlite3.DatabaseError` код пытается удалить DB/WAL/SHM, но проглатывает любые `OSError` (`app/database.py:43-55`). После этого он всегда делает `return sqlite3.connect(db_path, check_same_thread=False)`, не проверяя, были ли файлы реально удалены и прошел ли новый `integrity_check`.
+
+Пользовательский эффект: если corrupt DB не удаляется из-за lock/permission/AV scanner, приложение может продолжить с тем же поврежденным файлом и упасть позже в `_create_tables()`, `_migrate()` или при первом запросе. Лог при этом будет говорить "recreating", хотя пересоздание могло не состояться.
+
+Рекомендуемое исправление:
+- После удаления проверять, что основной файл отсутствует или был успешно replaced.
+- Если удалить не удалось, поднимать понятную ошибку или переименовывать corrupt DB в quarantine path.
+- После recreate обязательно повторять `PRAGMA integrity_check`.
+
+### CH-AUDIT-016 - `app.config` выполняет миграцию и filesystem writes уже при import
+
+Статус: подтверждено AST/top-level scan.
+Приоритет: P3.
+
+`app/config.py` на top-level создает `%APPDATA%/ClipboardHistory` (`os.makedirs(...)`) и может переместить старую DB из repo root (`shutil.move(...)`) просто при импорте модуля (`app/config.py:10-30`). Этот модуль импортируется многими частями приложения и любыми будущими tests/tools.
+
+Пользовательский эффект: тесты, линтеры, debug snippets и вспомогательные скрипты могут менять пользовательскую файловую систему или мигрировать DB без явного запуска приложения. Это повышает риск неожиданных side effects и усложняет тестирование.
+
+Рекомендуемое исправление:
+- Оставить в `config.py` только вычисление путей.
+- Вынести `ensure_data_dir()` и `migrate_legacy_db()` в явный startup step из `main.pyw`.
+- В тестах подменять data dir без риска реальной миграции.
+
 ## Проверено и не подтвердилось как текущая проблема
 
 - x64 HWND/LRESULT truncation: основные `restype`/`argtypes` для HWND/LRESULT в `main.pyw`, `clipboard_monitor.py`, `popup_window.py`, `paste_engine.py` уже выставлены.
@@ -173,10 +260,14 @@
 1. Исправить CH-AUDIT-001: перенести/защитить startup `wal_checkpoint`, добавить тест `Database(temp_path)` на свежей DB и на recreated DB.
 2. Исправить CH-AUDIT-002: сохранять исходный текст clipboard без `.strip()`, добавить регрессионные тесты на whitespace-sensitive content.
 3. Исправить CH-AUDIT-003: переработать image size limits так, чтобы 1080p/1440p screenshots сохранялись, но память была защищена.
-4. Спроектировать доступ к полной истории: pagination/lazy load для 500 записей, корректный count, проверка pinned + search UX.
-5. Укрепить Win32 status handling: visible warning для hotkey conflict и listener registration failure.
-6. Исправить preview positioning clamp для маленьких work area и multi-monitor layouts.
-7. Починить stale autostart detection: проверять registry value против текущего `SCRIPT_PATH`/команды.
-8. Добавить минимальный `pytest` каркас для Database и чистых helper-функций.
-9. Обсудить/добавить privacy controls: pause recording, stronger clear, retention настройки, возможно app denylist.
-10. При ближайших правках удалить мелкий мертвый код из CH-AUDIT-010.
+4. Исправить CH-AUDIT-011: убрать false dedup для long text, хранить original length/hash и явно показывать truncated entries.
+5. Спроектировать доступ к полной истории: pagination/lazy load для 500 записей, корректный count, проверка pinned + search UX.
+6. Укрепить Win32 status handling: visible warning для hotkey conflict, listener registration failure, missed clipboard reads и failed paste.
+7. Исправить paste result flow: проверять `SendInput` count, не делать `touch_entry()` до подтвержденного paste attempt.
+8. Исправить preview positioning clamp для маленьких work area и multi-monitor layouts.
+9. Починить stale autostart detection: проверять registry value против текущего `SCRIPT_PATH`/команды.
+10. Укрепить DB recovery и maintenance: CH-AUDIT-014/015, явный retry для failed `VACUUM`, надежный quarantine/recreate для corrupt DB.
+11. Вынести filesystem side effects из `app.config` в явный startup step.
+12. Добавить минимальный `pytest` каркас для Database и чистых helper-функций.
+13. Обсудить/добавить privacy controls: pause recording, stronger clear, retention настройки, возможно app denylist.
+14. При ближайших правках удалить мелкий мертвый код из CH-AUDIT-010.

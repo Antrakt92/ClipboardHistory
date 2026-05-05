@@ -3,10 +3,16 @@ import unittest
 from app.paste_engine import PasteCompletion, PasteStartResult
 from app.runtime_status import RuntimeIssue
 from app.popup_window import (
+    CLEAR_UNPINNED_ACTION,
+    CLEAR_UNPINNED_LABEL,
+    DELETE_ALL_ACTION,
+    DELETE_ALL_LABEL,
+    DANGER,
     HISTORY_PAGE_SIZE,
     PREVIEW_GAP,
     PREVIEW_MARGIN,
     PopupWindow,
+    TEXT_SECONDARY,
     _calculate_preview_position,
     _clamp_history_limit,
     _format_history_count,
@@ -215,12 +221,16 @@ class FakePopup:
 class FakeStatusLabel:
     def __init__(self):
         self.text = None
+        self.text_color = None
         self.packed = False
         self.pack_calls = []
         self.forget_calls = 0
 
-    def configure(self, text):
-        self.text = text
+    def configure(self, **kwargs):
+        if "text" in kwargs:
+            self.text = kwargs["text"]
+        if "text_color" in kwargs:
+            self.text_color = kwargs["text_color"]
 
     def pack(self, **kwargs):
         self.packed = True
@@ -250,6 +260,7 @@ class PopupStatusTests(unittest.TestCase):
             (RuntimeIssue("hotkey", "Hotkey unavailable"),),
         )
         self.assertEqual("Status: Hotkey unavailable", popup._status_label.text)
+        self.assertEqual(DANGER, popup._status_label.text_color)
         self.assertTrue(popup._status_label.packed)
         self.assertTrue(popup._status_label_visible)
 
@@ -267,6 +278,131 @@ class PopupStatusTests(unittest.TestCase):
         self.assertEqual("", popup._status_label.text)
         self.assertFalse(popup._status_label.packed)
         self.assertFalse(popup._status_label_visible)
+
+    def test_status_snapshot_shows_pause_without_issue_prefix(self):
+        popup = FakeStatusPopup()
+
+        PopupWindow.set_status_snapshot(popup, (), recording_paused=True)
+
+        self.assertEqual("Recording paused", popup._status_label.text)
+        self.assertTrue(popup._status_label.packed)
+
+
+class FakeClearButton:
+    def __init__(self, text):
+        self.text = text
+        self.text_color = TEXT_SECONDARY
+
+    def configure(self, **kwargs):
+        if "text" in kwargs:
+            self.text = kwargs["text"]
+        if "text_color" in kwargs:
+            self.text_color = kwargs["text_color"]
+
+
+class FakeClearDatabase:
+    def __init__(self):
+        self.clear_unpinned_calls = 0
+        self.clear_all_calls = 0
+
+    def clear_unpinned(self):
+        self.clear_unpinned_calls += 1
+        return 2
+
+    def clear_all(self):
+        self.clear_all_calls += 1
+        return 3
+
+
+class FakeClearPopup:
+    def __init__(self):
+        self._visible = True
+        self._pending_clear_action = None
+        self._clear_reset_after_id = None
+        self._clear_unpinned_btn = FakeClearButton(CLEAR_UNPINNED_LABEL)
+        self._delete_all_btn = FakeClearButton(DELETE_ALL_LABEL)
+        self.db = FakeClearDatabase()
+        self.after_callbacks = {}
+        self.after_cancelled = []
+        self.load_calls = []
+
+    def after(self, delay, callback):
+        after_id = f"after-{len(self.after_callbacks) + 1}"
+        self.after_callbacks[after_id] = (delay, callback)
+        return after_id
+
+    def after_cancel(self, after_id):
+        self.after_cancelled.append(after_id)
+
+    def _load_items(self, reset=False):
+        self.load_calls.append(reset)
+
+    def _cancel_clear_reset_timer(self):
+        return PopupWindow._cancel_clear_reset_timer(self)
+
+    def _configure_clear_buttons(self):
+        return PopupWindow._configure_clear_buttons(self)
+
+    def _run_clear_action(self, action):
+        return PopupWindow._run_clear_action(self, action)
+
+    def _reset_clear_confirm(self, force=False):
+        return PopupWindow._reset_clear_confirm(self, force=force)
+
+
+class PopupClearActionTests(unittest.TestCase):
+    def test_clear_confirmation_tracks_only_one_pending_action(self):
+        popup = FakeClearPopup()
+
+        PopupWindow._confirm_clear_action(popup, CLEAR_UNPINNED_ACTION)
+        first_timer = popup._clear_reset_after_id
+        self.assertEqual(CLEAR_UNPINNED_ACTION, popup._pending_clear_action)
+        self.assertEqual("Clear?", popup._clear_unpinned_btn.text)
+        self.assertEqual(DANGER, popup._clear_unpinned_btn.text_color)
+        self.assertEqual(DELETE_ALL_LABEL, popup._delete_all_btn.text)
+
+        PopupWindow._confirm_clear_action(popup, DELETE_ALL_ACTION)
+        self.assertEqual([first_timer], popup.after_cancelled)
+        self.assertEqual(DELETE_ALL_ACTION, popup._pending_clear_action)
+        self.assertEqual(CLEAR_UNPINNED_LABEL, popup._clear_unpinned_btn.text)
+        self.assertEqual("Delete all?", popup._delete_all_btn.text)
+        self.assertEqual(DANGER, popup._delete_all_btn.text_color)
+
+    def test_clear_unpinned_confirmation_calls_clear_unpinned_and_reloads(self):
+        popup = FakeClearPopup()
+
+        PopupWindow._confirm_clear_action(popup, CLEAR_UNPINNED_ACTION)
+        PopupWindow._confirm_clear_action(popup, CLEAR_UNPINNED_ACTION)
+
+        self.assertEqual(1, popup.db.clear_unpinned_calls)
+        self.assertEqual(0, popup.db.clear_all_calls)
+        self.assertEqual([False], popup.load_calls)
+        self.assertIsNone(popup._pending_clear_action)
+        self.assertEqual(CLEAR_UNPINNED_LABEL, popup._clear_unpinned_btn.text)
+
+    def test_delete_all_confirmation_calls_clear_all_and_reloads(self):
+        popup = FakeClearPopup()
+
+        PopupWindow._confirm_clear_action(popup, DELETE_ALL_ACTION)
+        PopupWindow._confirm_clear_action(popup, DELETE_ALL_ACTION)
+
+        self.assertEqual(0, popup.db.clear_unpinned_calls)
+        self.assertEqual(1, popup.db.clear_all_calls)
+        self.assertEqual([False], popup.load_calls)
+        self.assertIsNone(popup._pending_clear_action)
+        self.assertEqual(DELETE_ALL_LABEL, popup._delete_all_btn.text)
+
+    def test_clear_reset_restores_both_buttons(self):
+        popup = FakeClearPopup()
+
+        PopupWindow._confirm_clear_action(popup, DELETE_ALL_ACTION)
+        PopupWindow._reset_clear_confirm(popup, force=True)
+
+        self.assertIsNone(popup._pending_clear_action)
+        self.assertEqual(CLEAR_UNPINNED_LABEL, popup._clear_unpinned_btn.text)
+        self.assertEqual(TEXT_SECONDARY, popup._clear_unpinned_btn.text_color)
+        self.assertEqual(DELETE_ALL_LABEL, popup._delete_all_btn.text)
+        self.assertEqual(TEXT_SECONDARY, popup._delete_all_btn.text_color)
 
 
 class PopupPasteActionTests(unittest.TestCase):

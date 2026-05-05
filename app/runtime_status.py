@@ -53,8 +53,7 @@ def _issue_sort_key(issue):
         return (len(ISSUE_ORDER), issue.key)
 
 
-def format_status_title(snapshot):
-    issues = tuple(snapshot)
+def _format_issue_summary(issues):
     if not issues:
         return "OK"
     if len(issues) == 1:
@@ -62,21 +61,39 @@ def format_status_title(snapshot):
     return f"{len(issues)} issues"
 
 
-def format_popup_status(snapshot):
+def format_status_title(snapshot, recording_paused=False):
     issues = tuple(snapshot)
+    issue_summary = _format_issue_summary(issues)
+    if recording_paused and not issues:
+        return "Recording paused"
+    if recording_paused:
+        return f"Recording paused - {issue_summary}"
+    return issue_summary
+
+
+def format_popup_status(snapshot, recording_paused=False):
+    issues = tuple(snapshot)
+    if recording_paused and not issues:
+        return "Recording paused"
+    if recording_paused:
+        return "Recording paused · " + _format_issue_summary(issues)
     if not issues:
         return ""
-    return "Status: " + format_status_title(issues)
+    return "Status: " + _format_issue_summary(issues)
 
 
-def format_tray_status(snapshot):
+def format_tray_status(snapshot, recording_paused=False):
     issues = tuple(snapshot)
-    if not issues:
+    if not issues and not recording_paused:
         return ""
     parts = []
+    if recording_paused:
+        parts.append("Recording paused")
     for issue in issues:
         text = issue.title
         if issue.error_code is not None:
             text = f"{text} ({issue.error_code})"
         parts.append(text)
+    if recording_paused and not issues:
+        return parts[0]
     return "Status: " + "; ".join(parts)

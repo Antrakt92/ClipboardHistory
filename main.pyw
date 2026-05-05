@@ -40,6 +40,7 @@ from app.paste_engine import PasteEngine
 from app.autostart import is_autostart_enabled, toggle_autostart
 from app.create_icon import create_icon
 from app.logging_setup import configure_logging
+from app.recording_state import RecordingState
 from app.runtime_status import RuntimeStatusStore
 
 
@@ -49,6 +50,7 @@ class ClipboardHistoryApp:
         configure_logging(LOG_PATH)
         migrate_legacy_db()
         self.status_store = RuntimeStatusStore()
+        self.recording_state = RecordingState()
 
         if not os.path.exists(ICON_PATH):
             create_icon()
@@ -106,6 +108,8 @@ class ClipboardHistoryApp:
                 on_toggle_autostart=lambda: toggle_autostart(),
                 on_quit=lambda: self.root.after(0, self.quit),
                 is_autostart_enabled=is_autostart_enabled,
+                on_toggle_recording_pause=self._toggle_recording_pause,
+                is_recording_paused=self.recording_state.is_paused,
             )
             self._refresh_status_ui()
             self.tray.start()
@@ -117,10 +121,18 @@ class ClipboardHistoryApp:
             raise
 
     def _on_clipboard_change(self, content, content_type):
+        if self.recording_state.is_paused():
+            return
         if content_type == "image":
             self.db.add_entry("", content_type, image_data=content)
         elif content and content.strip():
             self.db.add_entry(content, content_type)
+
+    def _toggle_recording_pause(self):
+        paused = self.recording_state.toggle()
+        log.info("Recording paused" if paused else "Recording resumed")
+        self._schedule_status_refresh()
+        return paused
 
     def _on_component_status(self, key, title=None, detail=None, error_code=None):
         if title:
@@ -145,14 +157,15 @@ class ClipboardHistoryApp:
 
     def _refresh_status_ui(self):
         snapshot = self.status_store.snapshot()
+        recording_paused = self.recording_state.is_paused()
         if self.popup:
             try:
-                self.popup.set_status_snapshot(snapshot)
+                self.popup.set_status_snapshot(snapshot, recording_paused=recording_paused)
             except Exception:
                 log.debug("Failed to refresh popup status", exc_info=True)
         if self.tray:
             try:
-                self.tray.set_status_snapshot(snapshot)
+                self.tray.set_status_snapshot(snapshot, recording_paused=recording_paused)
             except Exception:
                 log.debug("Failed to refresh tray status", exc_info=True)
 

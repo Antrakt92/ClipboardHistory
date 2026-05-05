@@ -42,11 +42,26 @@ class RuntimeStatusTests(unittest.TestCase):
         self.assertEqual("OK", format_status_title(()))
         self.assertEqual("", format_popup_status(()))
         self.assertEqual("", format_tray_status(()))
+        self.assertEqual("Recording paused", format_status_title((), recording_paused=True))
+        self.assertEqual("Recording paused", format_popup_status((), recording_paused=True))
+        self.assertEqual("Recording paused", format_tray_status((), recording_paused=True))
 
         one = (RuntimeIssue("hotkey", "Hotkey unavailable", error_code=1409),)
         self.assertEqual("Hotkey unavailable", format_status_title(one))
         self.assertEqual("Status: Hotkey unavailable", format_popup_status(one))
         self.assertEqual("Status: Hotkey unavailable (1409)", format_tray_status(one))
+        self.assertEqual(
+            "Recording paused - Hotkey unavailable",
+            format_status_title(one, recording_paused=True),
+        )
+        self.assertEqual(
+            "Recording paused · Hotkey unavailable",
+            format_popup_status(one, recording_paused=True),
+        )
+        self.assertEqual(
+            "Status: Recording paused; Hotkey unavailable (1409)",
+            format_tray_status(one, recording_paused=True),
+        )
 
         many = (
             RuntimeIssue("hotkey", "Hotkey unavailable"),

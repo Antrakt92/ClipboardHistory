@@ -57,6 +57,10 @@ _FONT_SECTION = ("Segoe UI", 8)
 HISTORY_PAGE_SIZE = 30
 PREVIEW_MARGIN = 10
 PREVIEW_GAP = 8
+CLEAR_UNPINNED_ACTION = "clear_unpinned"
+DELETE_ALL_ACTION = "delete_all"
+CLEAR_UNPINNED_LABEL = "Clear unpinned"
+DELETE_ALL_LABEL = "Delete all"
 
 
 def relative_time(timestamp):
@@ -206,9 +210,11 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._preview_after_id = None
         self._preview_photo = None
         self._preview_entry_id = None
-        self._confirm_clear = False
+        self._pending_clear_action = None
+        self._clear_reset_after_id = None
         self._load_more_btn = None
-        self._clear_btn = None
+        self._clear_unpinned_btn = None
+        self._delete_all_btn = None
         self._focus_check_id = None
         self._status_label = None
         self._status_label_visible = False
@@ -259,12 +265,7 @@ class PopupWindow(customtkinter.CTkToplevel):
         except Exception:
             pass
 
-        # Reset clear confirmation
-        self._confirm_clear = False
-        try:
-            self._clear_btn.configure(text="Clear all", text_color=TEXT_SECONDARY)
-        except Exception:
-            pass
+        self._reset_clear_confirm(force=True)
 
         # Load fresh data
         self._load_items(reset=True)
@@ -301,6 +302,7 @@ class PopupWindow(customtkinter.CTkToplevel):
             except Exception:
                 pass
             self._search_after_id = None
+        self._reset_clear_confirm(force=True)
 
         self.withdraw()
 
@@ -430,19 +432,28 @@ class PopupWindow(customtkinter.CTkToplevel):
             corner_radius=4, command=self._load_more_items
         )
 
-        self._clear_btn = customtkinter.CTkButton(
-            footer, text="Clear all", width=60, height=22,
+        self._delete_all_btn = customtkinter.CTkButton(
+            footer, text=DELETE_ALL_LABEL, width=68, height=22,
             font=("Segoe UI", 10), fg_color="transparent",
             hover_color=SURFACE_HOVER, text_color=TEXT_SECONDARY,
-            corner_radius=4, command=self._clear_all
+            corner_radius=4, command=self._delete_all
         )
-        self._clear_btn.pack(side="right")
+        self._delete_all_btn.pack(side="right")
 
-    def set_status_snapshot(self, snapshot):
-        text = format_popup_status(snapshot)
+        self._clear_unpinned_btn = customtkinter.CTkButton(
+            footer, text=CLEAR_UNPINNED_LABEL, width=96, height=22,
+            font=("Segoe UI", 10), fg_color="transparent",
+            hover_color=SURFACE_HOVER, text_color=TEXT_SECONDARY,
+            corner_radius=4, command=self._clear_unpinned
+        )
+        self._clear_unpinned_btn.pack(side="right", padx=(0, 6))
+
+    def set_status_snapshot(self, snapshot, recording_paused=False):
+        text = format_popup_status(snapshot, recording_paused=recording_paused)
         if not self._status_label:
             return
-        self._status_label.configure(text=text)
+        text_color = DANGER if snapshot else PIN_COLOR
+        self._status_label.configure(text=text, text_color=text_color)
         if text and not self._status_label_visible:
             self._status_label.pack(side="left", padx=(8, 0))
             self._status_label_visible = True
@@ -946,24 +957,74 @@ class PopupWindow(customtkinter.CTkToplevel):
         self.db.delete_entry(entry_id)
         self._load_items(reset=False)
 
-    def _clear_all(self):
-        if self._confirm_clear:
-            self.db.clear_all()
-            self._confirm_clear = False
-            self._load_items(reset=False)
-        else:
-            self._confirm_clear = True
-            self._clear_btn.configure(text="Sure?", text_color=DANGER)
-            self.after(2000, self._reset_clear_confirm)
+    def _clear_unpinned(self):
+        self._confirm_clear_action(CLEAR_UNPINNED_ACTION)
 
-    def _reset_clear_confirm(self):
-        if not self._visible:
+    def _delete_all(self):
+        self._confirm_clear_action(DELETE_ALL_ACTION)
+
+    def _confirm_clear_action(self, action):
+        if self._pending_clear_action == action:
+            self._run_clear_action(action)
+            self._reset_clear_confirm(force=True)
+            self._load_items(reset=False)
             return
-        self._confirm_clear = False
+
+        self._pending_clear_action = action
+        self._cancel_clear_reset_timer()
+        self._configure_clear_buttons()
         try:
-            self._clear_btn.configure(text="Clear all", text_color=TEXT_SECONDARY)
+            self._clear_reset_after_id = self.after(2000, self._reset_clear_confirm)
+        except Exception:
+            log.debug("Failed to schedule clear confirmation reset", exc_info=True)
+            self._clear_reset_after_id = None
+
+    def _run_clear_action(self, action):
+        if action == CLEAR_UNPINNED_ACTION:
+            return self.db.clear_unpinned()
+        if action == DELETE_ALL_ACTION:
+            return self.db.clear_all()
+        log.warning("Unknown clear action: %s", action)
+        return 0
+
+    def _cancel_clear_reset_timer(self):
+        if not self._clear_reset_after_id:
+            return
+        try:
+            self.after_cancel(self._clear_reset_after_id)
         except Exception:
             pass
+        self._clear_reset_after_id = None
+
+    def _reset_clear_confirm(self, force=False):
+        if not force and not self._visible:
+            return
+        self._pending_clear_action = None
+        self._cancel_clear_reset_timer()
+        self._configure_clear_buttons()
+
+    def _configure_clear_buttons(self):
+        states = {
+            CLEAR_UNPINNED_ACTION: (CLEAR_UNPINNED_LABEL, TEXT_SECONDARY),
+            DELETE_ALL_ACTION: (DELETE_ALL_LABEL, TEXT_SECONDARY),
+        }
+        if self._pending_clear_action == CLEAR_UNPINNED_ACTION:
+            states[CLEAR_UNPINNED_ACTION] = ("Clear?", DANGER)
+        elif self._pending_clear_action == DELETE_ALL_ACTION:
+            states[DELETE_ALL_ACTION] = ("Delete all?", DANGER)
+
+        if self._clear_unpinned_btn:
+            try:
+                text, color = states[CLEAR_UNPINNED_ACTION]
+                self._clear_unpinned_btn.configure(text=text, text_color=color)
+            except Exception:
+                pass
+        if self._delete_all_btn:
+            try:
+                text, color = states[DELETE_ALL_ACTION]
+                self._delete_all_btn.configure(text=text, text_color=color)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Focus management

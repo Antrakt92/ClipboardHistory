@@ -6,7 +6,7 @@
 
 ## Текущий фокус
 
-1. Укрепить UX вокруг destructive actions, file clipboard и truncated text.
+1. Укрепить UX вокруг file clipboard и truncated text.
 2. Добавить privacy controls для clipboard manager сценариев.
 3. Продолжить вынос чистой логики в тестируемые helpers без лишних дубликатов.
 
@@ -40,26 +40,12 @@ Long text хранит `original_content_len` и `truncated`, но `content` о�
 
 Приоритет: P3.
 
-Приложение автоматически сохраняет clipboard text/images в SQLite под `%APPDATA%`. Для clipboard manager это ожидаемо, но без pause mode, denylist приложений, quick clear и настройки retention пользователь может случайно сохранить секреты.
+Приложение автоматически сохраняет clipboard text/images в SQLite под `%APPDATA%`. Для clipboard manager это ожидаемо, но без denylist приложений, настройки retention и более широкой privacy policy пользователь может случайно сохранить секреты. Runtime pause recording и явная сильная очистка уже покрывают базовые сценарии, но не заменяют app-aware controls.
 
 Что сделать:
-- Добавить tray action "Pause recording".
-- Добавить clear all including pinned или отдельную stronger clear command.
 - Обсудить retention settings для unpinned entries.
 - Рассмотреть app/process denylist.
 - Проверить, как privacy controls взаимодействуют с ignore-next при paste.
-
-### CH-AUDIT-022 - `Clear all` удаляет не все записи
-
-Приоритет: P3.
-
-В popup кнопка называется `Clear all`, но `Database.clear_all()` делает `DELETE FROM clipboard_history WHERE pinned = 0`. Pinned записи остаются в базе и UI. Это может быть технически правильной retention policy для pinned items, но текущий текст опасно неоднозначен: пользователь может думать, что очистил всю историю, включая pinned secrets/images.
-
-Что сделать:
-- Переименовать текущую кнопку в явный `Clear unpinned` / `Clear history`.
-- Добавить отдельную stronger action для удаления including pinned, желательно с более строгим подтверждением.
-- После выбора policy обновить README и audit wording про pinned retention.
-- Покрыть DB/UI helper tests для clear semantics.
 
 ### CH-AUDIT-008 - Тестовый каркас еще не покрывает GUI/Win32 edge cases
 
@@ -79,7 +65,7 @@ Storage, image helper logic, popup preview positioning, autostart command handli
 
 ## Сводка для следующей сессии
 
-1. Clear semantics/privacy controls (`CH-AUDIT-022`, `CH-AUDIT-009`).
-2. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
-3. Truncated long-text policy (`CH-AUDIT-018`).
+1. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
+2. Truncated long-text policy (`CH-AUDIT-018`).
+3. Remaining privacy controls: retention settings, app/process denylist, broader policy (`CH-AUDIT-009`).
 4. Дополнительные GUI/manual smoke checks для реального Win32 clipboard/tray поведения (`CH-AUDIT-008`).

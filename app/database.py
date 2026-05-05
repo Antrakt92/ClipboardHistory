@@ -379,16 +379,31 @@ class Database:
             self._cleanup_unlocked()
         self._maybe_vacuum()
 
-    def clear_all(self):
+    def clear_unpinned(self):
         with self.lock:
             if self._closed:
-                return
-            self.conn.execute(
+                return 0
+            cursor = self.conn.execute(
                 "DELETE FROM clipboard_history WHERE pinned = 0"
             )
             self.conn.commit()
-            self._needs_vacuum = True
+            deleted = cursor.rowcount
+            if deleted > 0:
+                self._needs_vacuum = True
         self._maybe_vacuum()
+        return deleted
+
+    def clear_all(self):
+        with self.lock:
+            if self._closed:
+                return 0
+            cursor = self.conn.execute("DELETE FROM clipboard_history")
+            self.conn.commit()
+            deleted = cursor.rowcount
+            if deleted > 0:
+                self._needs_vacuum = True
+        self._maybe_vacuum()
+        return deleted
 
     def _cleanup_unlocked(self):
         unpinned = self.conn.execute(

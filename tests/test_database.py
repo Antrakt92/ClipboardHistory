@@ -284,6 +284,63 @@ class DatabaseTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_clear_unpinned_deletes_only_unpinned_entries_and_returns_count(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with db.lock:
+                    insert_text_entry(db, "pinned", pinned=1)
+                    insert_text_entry(db, "unpinned-a", pinned=0)
+                    insert_text_entry(db, "unpinned-b", pinned=0)
+                    db.conn.commit()
+
+                deleted = db.clear_unpinned()
+
+                history = db.get_history(limit=10)
+                self.assertEqual(2, deleted)
+                self.assertEqual(["pinned"], [entry["preview"] for entry in history])
+                self.assertTrue(db._needs_vacuum)
+            finally:
+                db.close()
+
+    def test_clear_all_deletes_pinned_and_unpinned_entries_and_returns_count(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with db.lock:
+                    insert_text_entry(db, "pinned", pinned=1)
+                    insert_text_entry(db, "unpinned", pinned=0)
+                    db.conn.commit()
+
+                deleted = db.clear_all()
+
+                self.assertEqual(2, deleted)
+                self.assertEqual([], db.get_history(limit=10))
+                self.assertTrue(db._needs_vacuum)
+            finally:
+                db.close()
+
+    def test_noop_clear_returns_zero_and_does_not_request_vacuum(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                db._needs_vacuum = False
+
+                self.assertEqual(0, db.clear_unpinned())
+                self.assertFalse(db._needs_vacuum)
+                self.assertEqual(0, db.clear_all())
+                self.assertFalse(db._needs_vacuum)
+            finally:
+                db.close()
+
+    def test_clear_methods_return_zero_when_database_is_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            db.close()
+
+            self.assertEqual(0, db.clear_unpinned())
+            self.assertEqual(0, db.clear_all())
+
     def test_history_count_counts_all_rows_and_returns_zero_when_closed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(os.path.join(temp_dir, "history.db"))

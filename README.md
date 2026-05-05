@@ -12,13 +12,15 @@ Lightweight clipboard history manager for Windows. Lives in the system tray, sil
 - **Image preview** — hover over an image entry to see a larger preview
 - **Search** — filter history by typing in the search bar
 - **Pin** — pin important entries so they stay at the top
+- **Pause recording** — temporarily stop saving new clipboard entries from the tray menu
+- **Explicit clearing** — clear unpinned history separately, or delete all entries including pinned ones
 - **Click to paste** — select any entry and it gets pasted into the previously active window
 - **Keyboard navigation** — `Up`/`Down` to move, `Enter` to paste, `Escape` to close
 - **System tray** — runs quietly in the background with a tray icon menu
 - **Auto-start** — optionally start with Windows (toggle from tray menu)
 - **Single instance** — prevents duplicate processes via Windows Mutex
 - **Deduplication** — consecutive identical copies are stored only once
-- **SQLite storage** — up to 500 unpinned entries; pinned entries stay until unpinned or deleted
+- **SQLite storage** — up to 500 unpinned entries; pinned entries stay until unpinned, deleted, or explicit `Delete all`
 
 ## Installation
 
@@ -43,9 +45,11 @@ pythonw main.pyw
 python main.pyw
 ```
 
-The app appears in the system tray. Copy text or images as usual — they are saved automatically.
+The app appears in the system tray. Copy text or images as usual — they are saved automatically. Use `Pause recording` in the tray menu when you temporarily do not want new clipboard entries stored.
 
 Press `Ctrl+Shift+V` to open the history popup, then click any item to paste it.
+
+Use `Clear unpinned` to remove regular history while keeping pinned entries. Use `Delete all` when you want to remove pinned and unpinned entries together.
 
 ## How It Works
 

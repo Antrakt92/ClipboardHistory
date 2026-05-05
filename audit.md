@@ -38,20 +38,6 @@
 - Если места мало, показывать preview поверх popup/ниже курсора с тем же clamp.
 - Добавить тесты helper-а на narrow work area, отрицательные координаты и preview шире доступного места.
 
-### CH-AUDIT-006 - Autostart menu считает любой registry value валидным
-
-Приоритет: P2.
-
-`is_autostart_enabled()` возвращает `True`, если registry value существует, но не проверяет, что он указывает на текущие `pythonw` и `SCRIPT_PATH`. После переноса папки проекта, смены Python или ручного изменения registry меню может показывать включенный autostart, хотя запуск сломан.
-
-Что сделать:
-- Вынести expected autostart command в один helper, который используется и для записи, и для проверки.
-- Сравнивать registry command с ожидаемой командой или нормализованным `SCRIPT_PATH`.
-- При stale command считать autostart disabled/needs repair и при включении перезаписывать значение.
-- Использовать `CreateKey`/safe fallback для enable path, чтобы отсутствующий `Run` key не превращался в silent failure.
-- Вернуть toggle result наверх, чтобы tray/status мог показать failure.
-- Добавить unit tests на exact command, quoted paths, stale path и missing value.
-
 ### CH-AUDIT-007 - Ошибки Win32 listener/hotkey не видны пользователю
 
 Приоритет: P2.
@@ -131,10 +117,9 @@ Long text хранит `original_content_len` и `truncated`, но `content` о�
 
 Приоритет: P3.
 
-Storage и image helper logic уже имеют базовые `unittest` tests, но остаются нетестированными autostart command normalization, preview positioning, paste result flow, hotkey/listener status и clipboard retry policy.
+Storage, image helper logic и autostart command handling уже имеют базовые `unittest` tests, но остаются нетестированными preview positioning, paste result flow, hotkey/listener status и clipboard retry policy.
 
 Что сделать:
-- Вынести autostart command normalization в чистую функцию и покрыть tests.
 - Вынести preview positioning helper и покрыть geometry tests.
 - Для paste/status flow добавить тестируемые result objects без реального `SendInput`.
 - Для Win32 clipboard оставить manual smoke checklist, если автоматизация окажется слишком тяжелой.
@@ -159,9 +144,8 @@ Storage и image helper logic уже имеют базовые `unittest` tests,
 1. Full history pagination/lazy loading (`CH-AUDIT-004`).
 2. Paste result flow и visible status foundation (`CH-AUDIT-012`, затем `CH-AUDIT-007`).
 3. Preview positioning helper (`CH-AUDIT-005`).
-4. Autostart stale detection и reliable toggle result (`CH-AUDIT-006`).
-5. Clipboard retry/status (`CH-AUDIT-013`).
-6. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
-7. Truncated long-text policy (`CH-AUDIT-018`).
-8. Privacy controls (`CH-AUDIT-009`).
-9. Дополнительные tests и cleanup (`CH-AUDIT-008`, `CH-AUDIT-010`).
+4. Clipboard retry/status (`CH-AUDIT-013`).
+5. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
+6. Truncated long-text policy (`CH-AUDIT-018`).
+7. Privacy controls (`CH-AUDIT-009`).
+8. Дополнительные tests и cleanup (`CH-AUDIT-008`, `CH-AUDIT-010`).

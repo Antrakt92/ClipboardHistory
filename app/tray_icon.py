@@ -19,6 +19,10 @@ class TrayIcon:
         self.is_autostart_enabled = is_autostart_enabled
         self.icon = None
 
+    def _toggle_autostart(self):
+        if self.on_toggle_autostart() is False:
+            log.warning("Failed to toggle autostart")
+
     def start(self):
         if not os.path.exists(ICON_PATH):
             try:
@@ -41,7 +45,7 @@ class TrayIcon:
                 item("Show History", lambda icon, mi: self.on_show_popup(), default=True),
                 item(
                     "Start with Windows",
-                    lambda icon, mi: self.on_toggle_autostart(),
+                    lambda icon, mi: self._toggle_autostart(),
                     checked=lambda mi: self.is_autostart_enabled(),
                 ),
                 pystray.Menu.SEPARATOR,

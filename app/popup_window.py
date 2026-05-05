@@ -15,6 +15,7 @@ from app.config import (
     POPUP_HEIGHT,
     POPUP_WIDTH,
 )
+from app.runtime_status import format_popup_status
 
 user32 = ctypes.windll.user32
 log = logging.getLogger(__name__)
@@ -209,6 +210,8 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._load_more_btn = None
         self._clear_btn = None
         self._focus_check_id = None
+        self._status_label = None
+        self._status_label_visible = False
 
         self.overrideredirect(True)
         self.attributes("-topmost", True)
@@ -342,6 +345,10 @@ class PopupWindow(customtkinter.CTkToplevel):
         )
         title.pack(side="left")
 
+        self._status_label = customtkinter.CTkLabel(
+            header, text="", font=("Segoe UI", 10), text_color=DANGER
+        )
+
         close_btn = customtkinter.CTkButton(
             header, text="\u00d7", width=26, height=26,
             font=("Segoe UI", 14), fg_color="transparent",
@@ -430,6 +437,18 @@ class PopupWindow(customtkinter.CTkToplevel):
             corner_radius=4, command=self._clear_all
         )
         self._clear_btn.pack(side="right")
+
+    def set_status_snapshot(self, snapshot):
+        text = format_popup_status(snapshot)
+        if not self._status_label:
+            return
+        self._status_label.configure(text=text)
+        if text and not self._status_label_visible:
+            self._status_label.pack(side="left", padx=(8, 0))
+            self._status_label_visible = True
+        elif not text and self._status_label_visible:
+            self._status_label.pack_forget()
+            self._status_label_visible = False
 
     # ------------------------------------------------------------------
     # Item list (all plain tk for speed)

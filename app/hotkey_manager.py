@@ -4,9 +4,39 @@ Works regardless of keyboard layout (Russian, etc).
 """
 import ctypes
 import ctypes.wintypes
+import logging
 import threading
 
 user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
+
+user32.RegisterHotKey.argtypes = [
+    ctypes.wintypes.HWND,
+    ctypes.c_int,
+    ctypes.c_uint,
+    ctypes.c_uint,
+]
+user32.RegisterHotKey.restype = ctypes.wintypes.BOOL
+user32.UnregisterHotKey.argtypes = [ctypes.wintypes.HWND, ctypes.c_int]
+user32.UnregisterHotKey.restype = ctypes.wintypes.BOOL
+user32.GetMessageW.argtypes = [
+    ctypes.POINTER(ctypes.wintypes.MSG),
+    ctypes.wintypes.HWND,
+    ctypes.c_uint,
+    ctypes.c_uint,
+]
+user32.GetMessageW.restype = ctypes.wintypes.BOOL
+user32.PostThreadMessageW.argtypes = [
+    ctypes.wintypes.DWORD,
+    ctypes.c_uint,
+    ctypes.wintypes.WPARAM,
+    ctypes.wintypes.LPARAM,
+]
+user32.PostThreadMessageW.restype = ctypes.wintypes.BOOL
+kernel32.GetCurrentThreadId.restype = ctypes.wintypes.DWORD
+kernel32.GetLastError.restype = ctypes.wintypes.DWORD
+
+log = logging.getLogger(__name__)
 
 # Virtual key codes
 VK_V = 0x56
@@ -27,6 +57,8 @@ class HotkeyManager:
         self._thread_id = None
         self._ready = threading.Event()
         self.registered = False
+        self.error_code = None
+        self.error_message = None
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -43,11 +75,18 @@ class HotkeyManager:
             self._thread.join(timeout)
 
     def _run(self):
-        self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
+        self._thread_id = kernel32.GetCurrentThreadId()
 
         # Register Ctrl+Shift+V globally (VK code = layout-independent)
         result = user32.RegisterHotKey(None, HOTKEY_ID, MOD_CTRL | MOD_SHIFT | MOD_NOREPEAT, VK_V)
         self.registered = bool(result)
+        if result:
+            self.error_code = None
+            self.error_message = None
+        else:
+            self.error_code = kernel32.GetLastError()
+            self.error_message = "Ctrl+Shift+V hotkey could not be registered"
+            log.warning("%s, error=%s", self.error_message, self.error_code)
         self._ready.set()
         if not result:
             return

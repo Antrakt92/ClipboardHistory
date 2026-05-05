@@ -1,6 +1,7 @@
 import unittest
 
 from app.paste_engine import PasteCompletion, PasteStartResult
+from app.runtime_status import RuntimeIssue
 from app.popup_window import (
     HISTORY_PAGE_SIZE,
     PREVIEW_GAP,
@@ -209,6 +210,63 @@ class FakePopup:
 
     def _handle_paste_completion(self, entry_id, completion):
         return PopupWindow._handle_paste_completion(self, entry_id, completion)
+
+
+class FakeStatusLabel:
+    def __init__(self):
+        self.text = None
+        self.packed = False
+        self.pack_calls = []
+        self.forget_calls = 0
+
+    def configure(self, text):
+        self.text = text
+
+    def pack(self, **kwargs):
+        self.packed = True
+        self.pack_calls.append(kwargs)
+
+    def pack_forget(self):
+        self.packed = False
+        self.forget_calls += 1
+
+
+class FakeStatusPopup:
+    def __init__(self):
+        self._status_label = FakeStatusLabel()
+        self._status_label_visible = False
+
+
+class PopupStatusTests(unittest.TestCase):
+    def test_status_snapshot_hides_and_shows_header_status(self):
+        popup = FakeStatusPopup()
+
+        PopupWindow.set_status_snapshot(popup, ())
+        self.assertEqual("", popup._status_label.text)
+        self.assertFalse(popup._status_label.packed)
+
+        PopupWindow.set_status_snapshot(
+            popup,
+            (RuntimeIssue("hotkey", "Hotkey unavailable"),),
+        )
+        self.assertEqual("Status: Hotkey unavailable", popup._status_label.text)
+        self.assertTrue(popup._status_label.packed)
+        self.assertTrue(popup._status_label_visible)
+
+        PopupWindow.set_status_snapshot(
+            popup,
+            (
+                RuntimeIssue("hotkey", "Hotkey unavailable"),
+                RuntimeIssue("clipboard_listener", "Clipboard listener unavailable"),
+            ),
+        )
+        self.assertEqual("Status: 2 issues", popup._status_label.text)
+        self.assertEqual(1, len(popup._status_label.pack_calls))
+
+        PopupWindow.set_status_snapshot(popup, ())
+        self.assertEqual("", popup._status_label.text)
+        self.assertFalse(popup._status_label.packed)
+        self.assertFalse(popup._status_label_visible)
 
 
 class PopupPasteActionTests(unittest.TestCase):

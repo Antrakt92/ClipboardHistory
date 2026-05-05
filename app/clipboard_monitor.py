@@ -12,6 +12,12 @@ from PIL import Image
 from app.config import MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_RAW_IMAGE_BYTES
 
 log = logging.getLogger(__name__)
+CLIPBOARD_READ_KEY = "clipboard_read"
+CLIPBOARD_RETRY_DELAYS = (0.2, 0.5, 1.0)
+CLIPBOARD_BUSY_LOG_INTERVAL = 60
+CLIPBOARD_READ_OK = "ok"
+CLIPBOARD_READ_BUSY = "busy"
+CLIPBOARD_READ_ERROR = "error"
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -31,6 +37,8 @@ user32.RemoveClipboardFormatListener.restype = ctypes.wintypes.BOOL
 # Fix restype for functions returning pointer-sized values (default c_int truncates on x64)
 kernel32.GetModuleHandleW.argtypes = [ctypes.wintypes.LPCWSTR]
 kernel32.GetModuleHandleW.restype = ctypes.wintypes.HMODULE
+kernel32.GetCurrentThreadId.restype = ctypes.wintypes.DWORD
+kernel32.GetLastError.restype = ctypes.wintypes.DWORD
 user32.CreateWindowExW.argtypes = [
     ctypes.wintypes.DWORD, ctypes.wintypes.LPCWSTR, ctypes.wintypes.LPCWSTR,
     ctypes.wintypes.DWORD, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
@@ -43,6 +51,13 @@ user32.RegisterClassW.argtypes = [ctypes.c_void_p]
 user32.RegisterClassW.restype = ctypes.wintypes.ATOM
 user32.UnregisterClassW.argtypes = [ctypes.wintypes.LPCWSTR, ctypes.wintypes.HINSTANCE]
 user32.UnregisterClassW.restype = ctypes.wintypes.BOOL
+user32.PostThreadMessageW.argtypes = [
+    ctypes.wintypes.DWORD,
+    ctypes.c_uint,
+    ctypes.wintypes.WPARAM,
+    ctypes.wintypes.LPARAM,
+]
+user32.PostThreadMessageW.restype = ctypes.wintypes.BOOL
 
 WM_CLIPBOARDUPDATE = 0x031D
 WM_QUIT = 0x0012
@@ -72,8 +87,9 @@ class WNDCLASS(ctypes.Structure):
 
 
 class ClipboardMonitor:
-    def __init__(self, on_new_content):
+    def __init__(self, on_new_content, on_status=None, timer_factory=None):
         self.on_new_content = on_new_content
+        self.on_status = on_status
         self._running = threading.Event()
         self._running.set()
         self._ignore_lock = threading.Lock()
@@ -83,12 +99,25 @@ class ClipboardMonitor:
         self._ready = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._wndproc_ref = None  # prevent GC
+        self.listener_registered = False
+        self.startup_error_code = None
+        self.startup_error_message = None
+        self._timer_factory = timer_factory or threading.Timer
+        self._retry_lock = threading.Lock()
+        self._retry_timer = None
+        self._last_clipboard_warning = 0
+        self._clipboard_read_issue_active = False
 
     def start(self):
         self._thread.start()
 
+    def wait_ready(self, timeout=2):
+        self._ready.wait(timeout)
+        return self.listener_registered
+
     def stop(self, timeout=2):
         self._running.clear()
+        self._cancel_clipboard_retry()
         self._ready.wait(timeout=1)  # ensure window is created before posting
         if self._thread_id:
             # Post WM_QUIT to the thread message queue (not a window) so
@@ -109,6 +138,7 @@ class ClipboardMonitor:
         self._thread_id = kernel32.GetCurrentThreadId()
         hinstance = kernel32.GetModuleHandleW(None)
         class_name = "ClipboardHistoryMonitor"
+        class_registered = False
 
         self._wndproc_ref = WNDPROC(self._wnd_proc)
 
@@ -118,9 +148,10 @@ class ClipboardMonitor:
         wc.lpszClassName = class_name
 
         if not user32.RegisterClassW(ctypes.byref(wc)):
-            log.error("RegisterClassW failed for clipboard monitor")
+            self._set_startup_failure("RegisterClassW")
             self._ready.set()
             return
+        class_registered = True
 
         HWND_MESSAGE = ctypes.wintypes.HWND(-3)
         self._hwnd = user32.CreateWindowExW(
@@ -130,11 +161,25 @@ class ClipboardMonitor:
         )
 
         if not self._hwnd:
+            self._set_startup_failure("CreateWindowExW")
             self._ready.set()
-            user32.UnregisterClassW(class_name, hinstance)
+            if class_registered:
+                user32.UnregisterClassW(class_name, hinstance)
             return
 
-        user32.AddClipboardFormatListener(self._hwnd)
+        if not user32.AddClipboardFormatListener(self._hwnd):
+            self._set_startup_failure("AddClipboardFormatListener")
+            self._ready.set()
+            user32.DestroyWindow(self._hwnd)
+            self._hwnd = None
+            if class_registered:
+                user32.UnregisterClassW(class_name, hinstance)
+            return
+
+        self.listener_registered = True
+        self.startup_error_code = None
+        self.startup_error_message = None
+        self._notify_status("clipboard_listener")
         self._ready.set()
 
         msg = ctypes.wintypes.MSG()
@@ -145,9 +190,24 @@ class ClipboardMonitor:
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
 
-        user32.RemoveClipboardFormatListener(self._hwnd)
-        user32.DestroyWindow(self._hwnd)
-        user32.UnregisterClassW("ClipboardHistoryMonitor", hinstance)
+        if self.listener_registered and self._hwnd:
+            user32.RemoveClipboardFormatListener(self._hwnd)
+        if self._hwnd:
+            user32.DestroyWindow(self._hwnd)
+            self._hwnd = None
+        if class_registered:
+            user32.UnregisterClassW(class_name, hinstance)
+
+    def _set_startup_failure(self, operation):
+        self.startup_error_code = kernel32.GetLastError()
+        self.startup_error_message = f"{operation} failed for clipboard monitor"
+        log.error("%s, error=%s", self.startup_error_message, self.startup_error_code)
+        self._notify_status(
+            "clipboard_listener",
+            "Clipboard listener unavailable",
+            self.startup_error_message,
+            self.startup_error_code,
+        )
 
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
         if msg == WM_CLIPBOARDUPDATE:
@@ -155,21 +215,25 @@ class ClipboardMonitor:
                 if self._ignore_next:
                     self._ignore_next = False
                     return 0
+            self._cancel_clipboard_retry()
             self._read_clipboard()
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     def _read_clipboard(self):
+        self._cancel_clipboard_retry()
+        result = self._read_clipboard_once()
+        if result == CLIPBOARD_READ_OK:
+            self._clear_clipboard_read_issue()
+        elif result == CLIPBOARD_READ_BUSY:
+            self._schedule_clipboard_retry(0)
+
+    def _read_clipboard_once(self):
+        opened = False
         try:
-            # Retry OpenClipboard — another app may hold it briefly
-            for _attempt in range(3):
-                try:
-                    win32clipboard.OpenClipboard()
-                    break
-                except Exception:
-                    if _attempt == 2:
-                        return
-                    _time.sleep(0.05)
+            if not self._try_open_clipboard():
+                return CLIPBOARD_READ_BUSY
+            opened = True
             text_content = None
             raw_dib = None
             file_list = None
@@ -194,7 +258,8 @@ class ClipboardMonitor:
                         if self._is_raw_dib_size_allowed(dib_data):
                             raw_dib = bytes(dib_data)
             finally:
-                win32clipboard.CloseClipboard()
+                if opened:
+                    win32clipboard.CloseClipboard()
 
             # Process outside clipboard lock
             if text_content:
@@ -208,8 +273,81 @@ class ClipboardMonitor:
                 png_bytes = self._process_dib_image(raw_dib)
                 if png_bytes:
                     self.on_new_content(png_bytes, "image")
+            return CLIPBOARD_READ_OK
         except Exception:
             log.exception("Error reading clipboard")
+            return CLIPBOARD_READ_ERROR
+
+    @staticmethod
+    def _try_open_clipboard(attempts=3, delay=0.05):
+        for attempt in range(attempts):
+            try:
+                win32clipboard.OpenClipboard()
+                return True
+            except Exception:
+                if attempt < attempts - 1:
+                    _time.sleep(delay)
+        return False
+
+    def _schedule_clipboard_retry(self, retry_index):
+        if retry_index >= len(CLIPBOARD_RETRY_DELAYS):
+            self._report_clipboard_read_exhausted()
+            return False
+        if not self._running.is_set():
+            return False
+
+        delay = CLIPBOARD_RETRY_DELAYS[retry_index]
+        with self._retry_lock:
+            if self._retry_timer is not None:
+                return False
+            timer = self._timer_factory(
+                delay,
+                lambda: self._run_clipboard_retry(retry_index + 1),
+            )
+            timer.daemon = True
+            self._retry_timer = timer
+            timer.start()
+        return True
+
+    def _run_clipboard_retry(self, retry_index):
+        with self._retry_lock:
+            self._retry_timer = None
+        if not self._running.is_set():
+            return
+        result = self._read_clipboard_once()
+        if result == CLIPBOARD_READ_OK:
+            self._clear_clipboard_read_issue()
+        elif result == CLIPBOARD_READ_BUSY:
+            self._schedule_clipboard_retry(retry_index)
+
+    def _cancel_clipboard_retry(self):
+        with self._retry_lock:
+            timer = self._retry_timer
+            self._retry_timer = None
+        if timer is not None:
+            timer.cancel()
+
+    def _report_clipboard_read_exhausted(self):
+        now = _time.time()
+        if now - self._last_clipboard_warning >= CLIPBOARD_BUSY_LOG_INTERVAL:
+            self._last_clipboard_warning = now
+            log.warning("Clipboard remained busy after retries; update was skipped")
+        if not self._clipboard_read_issue_active:
+            self._clipboard_read_issue_active = True
+            self._notify_status(
+                CLIPBOARD_READ_KEY,
+                "Clipboard busy",
+                "Could not read clipboard because another app kept it open.",
+            )
+
+    def _clear_clipboard_read_issue(self):
+        if self._clipboard_read_issue_active:
+            self._clipboard_read_issue_active = False
+            self._notify_status(CLIPBOARD_READ_KEY)
+
+    def _notify_status(self, key, title=None, detail=None, error_code=None):
+        if self.on_status:
+            self.on_status(key, title, detail, error_code)
 
     @staticmethod
     def _is_raw_dib_size_allowed(dib_data):

@@ -6,38 +6,12 @@
 
 ## Текущий фокус
 
-1. Сделать Win32 listener/hotkey/clipboard retry failures видимыми, логируемыми и проверяемыми, чтобы приложение не выглядело рабочим при сломанном listener/hotkey.
-2. Синхронизировать заявленную Python compatibility policy с реальным runtime syntax.
-3. Укрепить UX вокруг destructive actions, file clipboard и truncated text.
-4. Добавить privacy controls для clipboard manager сценариев.
-5. Продолжить вынос чистой логики в тестируемые helpers без лишних дубликатов.
+1. Синхронизировать заявленную Python compatibility policy с реальным runtime syntax.
+2. Укрепить UX вокруг destructive actions, file clipboard и truncated text.
+3. Добавить privacy controls для clipboard manager сценариев.
+4. Продолжить вынос чистой логики в тестируемые helpers без лишних дубликатов.
 
 ## Открытые находки
-
-### CH-AUDIT-007 - Ошибки Win32 listener/hotkey не видны пользователю
-
-Приоритет: P2.
-
-Если global hotkey не зарегистрировался, приложение только пишет warning и продолжает работу в tray. Если `AddClipboardFormatListener()` вернет `False`, результат сейчас не поднимается в UI. Пользователь не понимает, почему hotkey не работает или история не пополняется.
-
-Что сделать:
-- Проверять return value `AddClipboardFormatListener()`.
-- Логировать `GetLastError()` с контекстом.
-- Пробросить compact status наверх: hotkey unavailable, clipboard listener unavailable.
-- Отобразить status в tray menu/title или popup без тяжелого UX.
-- Решить, нужен ли retry/backoff для listener registration.
-
-### CH-AUDIT-013 - Clipboard read silently drops events при занятом clipboard
-
-Приоритет: P2.
-
-`ClipboardMonitor._read_clipboard()` делает 3 попытки `OpenClipboard()` с короткими паузами и на последней ошибке просто возвращается без visible status. Некоторые updates могут потеряться, если источник или другое приложение держит clipboard чуть дольше.
-
-Что сделать:
-- Логировать final failure с throttling.
-- Добавить deferred retry через короткий timer/backoff, пока update еще актуален.
-- Не блокировать message loop долгими retry.
-- Рассмотреть общий status channel вместе с CH-AUDIT-007.
 
 ### CH-AUDIT-023 - README обещает Python 3.8+, но runtime уже требует новее
 
@@ -116,7 +90,7 @@ Long text хранит `original_content_len` и `truncated`, но `content` о�
 
 Приоритет: P3.
 
-Storage, image helper logic, popup preview positioning, autostart command handling и paste result flow уже имеют базовые `unittest` tests, но остаются нетестированными hotkey/listener status, clipboard retry policy, Python minimum compatibility и single-instance startup edge cases.
+Storage, image helper logic, popup preview positioning, autostart command handling, paste result flow, runtime status и clipboard retry уже имеют базовые `unittest` tests, но остаются нетестированными Python minimum compatibility и single-instance startup edge cases.
 
 Что сделать:
 - Для Win32 clipboard оставить manual smoke checklist, если автоматизация окажется слишком тяжелой.
@@ -132,11 +106,9 @@ Storage, image helper logic, popup preview positioning, autostart command handli
 
 ## Сводка для следующей сессии
 
-1. Visible listener/hotkey status foundation (`CH-AUDIT-007`).
-2. Clipboard retry/status (`CH-AUDIT-013`).
-3. Python minimum compatibility policy и проверка версии (`CH-AUDIT-023`).
-4. Single-instance mutex failure handling (`CH-AUDIT-024`).
-5. Clear semantics/privacy controls (`CH-AUDIT-022`, `CH-AUDIT-009`).
-6. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
-7. Truncated long-text policy (`CH-AUDIT-018`).
-8. Дополнительные tests для hotkey/listener, clipboard retry, compatibility и startup edge cases (`CH-AUDIT-008`).
+1. Python minimum compatibility policy и проверка версии (`CH-AUDIT-023`).
+2. Single-instance mutex failure handling (`CH-AUDIT-024`).
+3. Clear semantics/privacy controls (`CH-AUDIT-022`, `CH-AUDIT-009`).
+4. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
+5. Truncated long-text policy (`CH-AUDIT-018`).
+6. Дополнительные tests для compatibility и startup edge cases (`CH-AUDIT-008`).

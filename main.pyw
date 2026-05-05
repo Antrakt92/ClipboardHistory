@@ -37,6 +37,7 @@ from app.paste_engine import PasteEngine
 from app.autostart import is_autostart_enabled, toggle_autostart
 from app.create_icon import create_icon
 from app.logging_setup import configure_logging
+from app.runtime_status import RuntimeStatusStore
 
 
 class ClipboardHistoryApp:
@@ -44,6 +45,7 @@ class ClipboardHistoryApp:
         ensure_data_dir()
         configure_logging(LOG_PATH)
         migrate_legacy_db()
+        self.status_store = RuntimeStatusStore()
 
         if not os.path.exists(ICON_PATH):
             create_icon()
@@ -64,17 +66,37 @@ class ClipboardHistoryApp:
         try:
             self.db = Database(DB_PATH)
 
-            self.monitor = ClipboardMonitor(on_new_content=self._on_clipboard_change)
+            self.monitor = ClipboardMonitor(
+                on_new_content=self._on_clipboard_change,
+                on_status=self._on_component_status,
+            )
             self.monitor.start()
+            if not self.monitor.wait_ready():
+                self._set_runtime_issue(
+                    "clipboard_listener",
+                    "Clipboard listener unavailable",
+                    self.monitor.startup_error_message,
+                    self.monitor.startup_error_code,
+                )
+            else:
+                self._clear_runtime_issue("clipboard_listener")
 
             # Create popup once (hidden) — reused on every hotkey press
             self.popup = PopupWindow(self.root, self.db, self.paste_engine, self.monitor)
+            self._refresh_status_ui()
 
             self.hotkey = HotkeyManager(on_activate=self._on_hotkey)
             self.hotkey.start()
 
             if not self.hotkey.wait_ready():
-                log.warning("Ctrl+Shift+V hotkey could not be registered (another app may use it)")
+                self._set_runtime_issue(
+                    "hotkey",
+                    "Hotkey unavailable",
+                    self.hotkey.error_message,
+                    self.hotkey.error_code,
+                )
+            else:
+                self._clear_runtime_issue("hotkey")
 
             self.tray = TrayIcon(
                 on_show_popup=lambda: self._show_popup_from_tray(),
@@ -82,7 +104,9 @@ class ClipboardHistoryApp:
                 on_quit=lambda: self.root.after(0, self.quit),
                 is_autostart_enabled=is_autostart_enabled,
             )
+            self._refresh_status_ui()
             self.tray.start()
+            self._refresh_status_ui()
             log.info("Clipboard History Manager started")
         except Exception:
             log.exception("Failed to initialize, cleaning up")
@@ -94,6 +118,40 @@ class ClipboardHistoryApp:
             self.db.add_entry("", content_type, image_data=content)
         elif content and content.strip():
             self.db.add_entry(content, content_type)
+
+    def _on_component_status(self, key, title=None, detail=None, error_code=None):
+        if title:
+            self.status_store.set_issue(key, title, detail, error_code)
+        else:
+            self.status_store.clear_issue(key)
+        self._schedule_status_refresh()
+
+    def _set_runtime_issue(self, key, title, detail=None, error_code=None):
+        self.status_store.set_issue(key, title, detail, error_code)
+        self._schedule_status_refresh()
+
+    def _clear_runtime_issue(self, key):
+        self.status_store.clear_issue(key)
+        self._schedule_status_refresh()
+
+    def _schedule_status_refresh(self):
+        try:
+            self.root.after(0, self._refresh_status_ui)
+        except Exception:
+            log.debug("Failed to schedule status refresh", exc_info=True)
+
+    def _refresh_status_ui(self):
+        snapshot = self.status_store.snapshot()
+        if self.popup:
+            try:
+                self.popup.set_status_snapshot(snapshot)
+            except Exception:
+                log.debug("Failed to refresh popup status", exc_info=True)
+        if self.tray:
+            try:
+                self.tray.set_status_snapshot(snapshot)
+            except Exception:
+                log.debug("Failed to refresh tray status", exc_info=True)
 
     def _show_popup_from_tray(self):
         # Capture foreground window on the tray thread before Tk shifts focus

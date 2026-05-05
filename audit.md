@@ -1,41 +1,16 @@
 # ClipboardHistory Audit
 
-Дата актуализации: 2026-05-05
+Дата актуализации: 2026-05-06
 
 Назначение файла: forward-looking backlog по проекту. Здесь должны оставаться только реальные открытые баги, edge cases, риски и улучшения, которые еще нужно сделать. Закрытые задачи не переносить в этот файл; историю уже сделанного смотреть через `git log` / `git show`.
 
 ## Текущий фокус
 
-1. Синхронизировать заявленную Python compatibility policy с реальным runtime syntax.
-2. Укрепить UX вокруг destructive actions, file clipboard и truncated text.
-3. Добавить privacy controls для clipboard manager сценариев.
-4. Продолжить вынос чистой логики в тестируемые helpers без лишних дубликатов.
+1. Укрепить UX вокруг destructive actions, file clipboard и truncated text.
+2. Добавить privacy controls для clipboard manager сценариев.
+3. Продолжить вынос чистой логики в тестируемые helpers без лишних дубликатов.
 
 ## Открытые находки
-
-### CH-AUDIT-023 - README обещает Python 3.8+, но runtime уже требует новее
-
-Приоритет: P2.
-
-README заявляет `Python 3.8+`, но `app/paste_engine.py` использует PEP 604 annotations вида `str | None` без `from __future__ import annotations`. На Python 3.8/3.9 такой модуль упадет при импорте на вычислении annotations, то есть приложение не стартует несмотря на заявленную поддержку. В репозитории также нет `pyproject.toml`/CI matrix, которая фиксирует минимальную версию.
-
-Что сделать:
-- Выбрать политику: реально поддерживать Python 3.8/3.9 или поднять minimum до Python 3.10+.
-- Если сохранять 3.8/3.9, заменить PEP 604 runtime annotations на `typing.Optional[...]` или включить postponed annotations там, где это безопасно.
-- Если поднимать minimum, обновить README/badges и добавить явную проверку версии при startup или в dev docs.
-- Добавить compatibility check в CI/manual checklist, чтобы новые language features не расходились с README.
-
-### CH-AUDIT-024 - Single-instance mutex failure не обрабатывается как failure
-
-Приоритет: P3.
-
-`main.pyw` вызывает `CreateMutexW(...)` и проверяет только `GetLastError() == ERROR_ALREADY_EXISTS`. Если `CreateMutexW` вернет null handle по другой причине, например access denied к уже существующему named object или редкий Win32 failure, приложение продолжит старт без надежной single-instance защиты. На `quit()` затем вызывается `CloseHandle(_mutex)` даже если handle нулевой. Это edge case, но он находится в самом раннем startup path.
-
-Что сделать:
-- Задать `CreateMutexW.argtypes/restype`, проверить null handle сразу после вызова.
-- Для `ERROR_ALREADY_EXISTS` оставить quiet exit; для других failures выбрать безопасное поведение: exit с минимальным user-visible/loggable сигналом или fallback lock.
-- Не вызывать `CloseHandle` для null/invalid handle.
-- Добавить unit-testable helper для single-instance decision logic, чтобы не тестировать это через настоящий глобальный mutex.
 
 ### CH-AUDIT-020 - File clipboard сохраняется как текстовые пути, но не paste-ится обратно как файлы
 
@@ -90,12 +65,10 @@ Long text хранит `original_content_len` и `truncated`, но `content` о�
 
 Приоритет: P3.
 
-Storage, image helper logic, popup preview positioning, autostart command handling, paste result flow, runtime status и clipboard retry уже имеют базовые `unittest` tests, но остаются нетестированными Python minimum compatibility и single-instance startup edge cases.
+Storage, image helper logic, popup preview positioning, autostart command handling, paste result flow, runtime status, clipboard retry, Python compatibility и single-instance startup уже имеют базовые `unittest` tests. Остаются более широкие GUI/manual smoke checks для реального Win32 clipboard/tray поведения.
 
 Что сделать:
 - Для Win32 clipboard оставить manual smoke checklist, если автоматизация окажется слишком тяжелой.
-- Добавить lightweight compatibility/static checks для заявленной минимальной Python версии.
-- Вынести single-instance startup decision в тестируемый helper.
 
 ## Проверки для будущих правок
 
@@ -106,9 +79,7 @@ Storage, image helper logic, popup preview positioning, autostart command handli
 
 ## Сводка для следующей сессии
 
-1. Python minimum compatibility policy и проверка версии (`CH-AUDIT-023`).
-2. Single-instance mutex failure handling (`CH-AUDIT-024`).
-3. Clear semantics/privacy controls (`CH-AUDIT-022`, `CH-AUDIT-009`).
-4. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
-5. Truncated long-text policy (`CH-AUDIT-018`).
-6. Дополнительные tests для compatibility и startup edge cases (`CH-AUDIT-008`).
+1. Clear semantics/privacy controls (`CH-AUDIT-022`, `CH-AUDIT-009`).
+2. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
+3. Truncated long-text policy (`CH-AUDIT-018`).
+4. Дополнительные GUI/manual smoke checks для реального Win32 clipboard/tray поведения (`CH-AUDIT-008`).

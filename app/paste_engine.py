@@ -6,6 +6,7 @@ import threading
 import time
 import win32clipboard
 from dataclasses import dataclass
+from typing import Optional
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -35,19 +36,19 @@ class PasteStartResult:
     clipboard_set: bool
     started: bool
     content_type: str
-    reason: str | None = None
+    reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class PasteCompletion:
-    target_hwnd: int | None
+    target_hwnd: Optional[int]
     target_valid: bool
     focus_attempted: bool
-    focus_succeeded: bool | None
-    focus_error: int | None
+    focus_succeeded: Optional[bool]
+    focus_error: Optional[int]
     send_input_count: int
     expected_input_count: int
-    send_error: int | None
+    send_error: Optional[int]
     success: bool
 
 

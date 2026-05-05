@@ -5,24 +5,27 @@ Runs in system tray with no console window.
 """
 import os
 import sys
-import ctypes
-import ctypes.wintypes
-import logging
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
 
-log = logging.getLogger(__name__)
+from app.single_instance import acquire_single_instance, release_single_instance
 
 # Single instance check via Named Mutex
-_kernel32 = ctypes.windll.kernel32
-_kernel32.CreateMutexW.restype = ctypes.wintypes.HANDLE
-_kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
-_mutex = _kernel32.CreateMutexW(None, True, "ClipboardHistoryManager_SingleInstance")
-if _kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+_single_instance = acquire_single_instance()
+if _single_instance.already_running:
+    release_single_instance(_single_instance.handle)
     sys.exit(0)
+if not _single_instance.acquired:
+    sys.exit(1)
+_single_instance_handle = _single_instance.handle
 
+import ctypes
+import ctypes.wintypes
+import logging
 import customtkinter
+
+log = logging.getLogger(__name__)
 
 # Fix GetForegroundWindow to return pointer-sized HWND (not truncated c_int on x64)
 ctypes.windll.user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
@@ -198,7 +201,9 @@ class ClipboardHistoryApp:
     def quit(self):
         log.info("Shutting down...")
         self._stop_components()
-        _kernel32.CloseHandle(_mutex)
+        global _single_instance_handle
+        release_single_instance(_single_instance_handle)
+        _single_instance_handle = None
         self.root.quit()
 
     def run(self):

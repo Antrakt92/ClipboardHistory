@@ -8,7 +8,7 @@ import time
 import unittest
 from pathlib import Path
 
-from app.config import MAX_CONTENT_LENGTH, MAX_IMAGE_BYTES
+from app.config import MAX_CONTENT_LENGTH, MAX_HISTORY_SIZE, MAX_IMAGE_BYTES
 from app.database import Database
 
 
@@ -37,6 +37,24 @@ def create_legacy_db(path):
         conn.commit()
     finally:
         conn.close()
+
+
+def insert_text_entry(db, content, pinned=0, timestamp=None):
+    timestamp = time.time() if timestamp is None else timestamp
+    db.conn.execute(
+        """INSERT INTO clipboard_history (
+               content, content_type, timestamp, pinned, preview,
+               content_hash, original_content_len, truncated
+           ) VALUES (?, 'text', ?, ?, ?, ?, ?, 0)""",
+        (
+            content,
+            timestamp,
+            pinned,
+            content[:200],
+            Database._text_hash(content),
+            len(content),
+        )
+    )
 
 
 class DatabaseTests(unittest.TestCase):
@@ -202,6 +220,67 @@ class DatabaseTests(unittest.TestCase):
             try:
                 self.assertFalse(db.add_entry("", "image", b"x" * (MAX_IMAGE_BYTES + 1)))
                 self.assertEqual([], db.get_history())
+            finally:
+                db.close()
+
+    def test_pinned_entries_do_not_block_new_unpinned_entries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with db.lock:
+                    for i in range(MAX_HISTORY_SIZE):
+                        insert_text_entry(db, f"pinned-{i}", pinned=1, timestamp=i)
+                    db.conn.commit()
+
+                self.assertTrue(db.add_entry("new unpinned"))
+
+                history = db.get_history(limit=MAX_HISTORY_SIZE + 10)
+                self.assertEqual(MAX_HISTORY_SIZE + 1, len(history))
+                self.assertTrue(any(entry["preview"] == "new unpinned" for entry in history))
+                self.assertEqual(1, sum(1 for entry in history if not entry["pinned"]))
+            finally:
+                db.close()
+
+    def test_cleanup_limits_unpinned_entries_not_total_entries(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with db.lock:
+                    insert_text_entry(db, "pinned", pinned=1, timestamp=-1)
+                    for i in range(MAX_HISTORY_SIZE + 1):
+                        insert_text_entry(db, f"unpinned-{i}", pinned=0, timestamp=i)
+                    db.conn.commit()
+                    db._cleanup_unlocked()
+
+                history = db.get_history(limit=MAX_HISTORY_SIZE + 5)
+                previews = {entry["preview"] for entry in history}
+                self.assertEqual(MAX_HISTORY_SIZE + 1, len(history))
+                self.assertIn("pinned", previews)
+                self.assertNotIn("unpinned-0", previews)
+                self.assertEqual(MAX_HISTORY_SIZE, sum(1 for entry in history if not entry["pinned"]))
+            finally:
+                db.close()
+
+    def test_unpin_triggers_cleanup_when_unpinned_cap_is_full(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with db.lock:
+                    insert_text_entry(db, "old pinned", pinned=1, timestamp=-1)
+                    pinned_id = db.conn.execute(
+                        "SELECT id FROM clipboard_history WHERE preview = 'old pinned'"
+                    ).fetchone()["id"]
+                    for i in range(MAX_HISTORY_SIZE):
+                        insert_text_entry(db, f"unpinned-{i}", pinned=0, timestamp=i)
+                    db.conn.commit()
+
+                db.toggle_pin(pinned_id)
+
+                history = db.get_history(limit=MAX_HISTORY_SIZE + 5)
+                previews = {entry["preview"] for entry in history}
+                self.assertEqual(MAX_HISTORY_SIZE, len(history))
+                self.assertNotIn("old pinned", previews)
+                self.assertEqual(MAX_HISTORY_SIZE, sum(1 for entry in history if not entry["pinned"]))
             finally:
                 db.close()
 

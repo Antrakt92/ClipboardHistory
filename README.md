@@ -18,7 +18,7 @@ Lightweight clipboard history manager for Windows. Lives in the system tray, sil
 - **Auto-start** — optionally start with Windows (toggle from tray menu)
 - **Single instance** — prevents duplicate processes via Windows Mutex
 - **Deduplication** — consecutive identical copies are stored only once
-- **SQLite storage** — up to 500 entries with automatic cleanup of oldest unpinned items
+- **SQLite storage** — up to 500 unpinned entries; pinned entries stay until unpinned or deleted
 
 ## Installation
 

@@ -369,6 +369,8 @@ class Database:
                 (entry_id,)
             )
             self.conn.commit()
+            self._cleanup_unlocked()
+        self._maybe_vacuum()
 
     def clear_all(self):
         with self.lock:
@@ -382,19 +384,12 @@ class Database:
         self._maybe_vacuum()
 
     def _cleanup_unlocked(self):
-        count = self.conn.execute(
-            "SELECT COUNT(*) as cnt FROM clipboard_history"
+        unpinned = self.conn.execute(
+            "SELECT COUNT(*) as cnt FROM clipboard_history WHERE pinned = 0"
         ).fetchone()["cnt"]
 
-        if count > MAX_HISTORY_SIZE:
-            unpinned = self.conn.execute(
-                "SELECT COUNT(*) as cnt FROM clipboard_history WHERE pinned = 0"
-            ).fetchone()["cnt"]
-            if unpinned == 0:
-                log.debug("All %d entries are pinned, skipping cleanup", count)
-                return
-            excess = count - MAX_HISTORY_SIZE
-            to_delete = min(excess, unpinned)
+        if unpinned > MAX_HISTORY_SIZE:
+            to_delete = unpinned - MAX_HISTORY_SIZE
             self.conn.execute("""
                 DELETE FROM clipboard_history WHERE id IN (
                     SELECT id FROM clipboard_history

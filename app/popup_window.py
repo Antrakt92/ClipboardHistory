@@ -7,7 +7,13 @@ import time
 
 from PIL import Image as PILImage, ImageTk
 
-from app.config import POPUP_WIDTH, POPUP_HEIGHT, IMAGE_THUMB_SIZE, IMAGE_PREVIEW_SIZE, IMAGE_PREVIEW_DELAY
+from app.config import (
+    IMAGE_PREVIEW_DELAY,
+    IMAGE_PREVIEW_SIZE,
+    IMAGE_THUMB_SIZE,
+    POPUP_HEIGHT,
+    POPUP_WIDTH,
+)
 
 user32 = ctypes.windll.user32
 
@@ -30,7 +36,6 @@ SURFACE_PINNED = "#1a1f1a"
 SURFACE_PINNED_HOVER = "#222822"
 SURFACE_SELECTED = "#2a2a2a"
 BORDER = "#2a2a2a"
-ACCENT_DIM = "#3d4f8a"
 TEXT_PRIMARY = "#e8e8e8"
 TEXT_SECONDARY = "#888888"
 TEXT_DIM = "#555555"
@@ -46,6 +51,8 @@ LARGE_TEXT_THRESHOLD = 500
 _FONT_ITEM = ("Segoe UI", 11)
 _FONT_SMALL = ("Segoe UI", 9)
 _FONT_SECTION = ("Segoe UI", 8)
+PREVIEW_MARGIN = 10
+PREVIEW_GAP = 8
 
 
 def relative_time(timestamp):
@@ -97,6 +104,47 @@ def _get_monitor_work_area(x, y):
     return 0, 0, w, h
 
 
+def _clamp_window_position(value, size, area_start, area_end, margin):
+    if size + margin * 2 <= area_end - area_start:
+        lower = area_start + margin
+        upper = area_end - size - margin
+    else:
+        lower = area_start
+        upper = area_end - size
+    if upper < lower:
+        return lower
+    return max(lower, min(value, upper))
+
+
+def _calculate_preview_position(
+    popup_x,
+    popup_width,
+    anchor_y,
+    preview_width,
+    preview_height,
+    work_area,
+    margin=PREVIEW_MARGIN,
+    gap=PREVIEW_GAP,
+):
+    left, top, right, bottom = work_area
+    right_x = popup_x + popup_width + gap
+    left_x = popup_x - preview_width - gap
+
+    if right_x + preview_width + margin <= right:
+        preferred_x = right_x
+    elif left_x >= left + margin:
+        preferred_x = left_x
+    else:
+        right_room = right - (popup_x + popup_width)
+        left_room = popup_x - left
+        preferred_x = right_x if right_room >= left_room else left_x
+
+    return (
+        _clamp_window_position(preferred_x, preview_width, left, right, margin),
+        _clamp_window_position(anchor_y, preview_height, top, bottom, margin),
+    )
+
+
 def _set_bg_recursive(widget, bg):
     """Set background color on widget and all descendants."""
     try:
@@ -115,7 +163,6 @@ class PopupWindow(customtkinter.CTkToplevel):
         self.db = database
         self.paste_engine = paste_engine
         self.monitor = monitor
-        self._master = master
         self._visible = False
 
         self._prev_hwnd = None
@@ -607,7 +654,6 @@ class PopupWindow(customtkinter.CTkToplevel):
             label = tk.Label(border, image=tk_img, bg=BG, borderwidth=0)
             label.pack(padx=6, pady=6)
 
-            # Position: right of popup, or left if no space
             self.update_idletasks()
             preview_win.update_idletasks()
             pw = preview_win.winfo_reqwidth()
@@ -617,16 +663,18 @@ class PopupWindow(customtkinter.CTkToplevel):
 
             ml, mt, mr, mb = _get_monitor_work_area(popup_x + popup_w // 2, self.winfo_y())
 
-            if popup_x + popup_w + pw + 10 < mr:
-                px = popup_x + popup_w + 8
-            else:
-                px = popup_x - pw - 8
-
             try:
                 wy = widget.winfo_rooty()
             except Exception:
                 wy = self.winfo_y()
-            py = max(mt + 10, min(wy, mb - ph - 10))
+            px, py = _calculate_preview_position(
+                popup_x,
+                popup_w,
+                wy,
+                pw,
+                ph,
+                (ml, mt, mr, mb),
+            )
 
             preview_win.geometry(f"+{px}+{py}")
         except Exception:

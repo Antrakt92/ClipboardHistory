@@ -8,7 +8,7 @@
 
 1. Дать пользователю доступ ко всей сохраненной истории, а не только к первым 30 элементам.
 2. Сделать Win32/paste failures видимыми и проверяемыми, чтобы приложение не выглядело рабочим при сломанном listener/hotkey/paste.
-3. Укрепить UX вокруг изображений, file clipboard, truncated text и preview positioning.
+3. Укрепить UX вокруг file clipboard и truncated text.
 4. Добавить privacy controls для clipboard manager сценариев.
 5. Продолжить вынос чистой логики в тестируемые helpers без лишних дубликатов.
 
@@ -25,18 +25,6 @@
 - Показывать общий count отдельно от currently loaded count.
 - Проверить UX для pinned entries: pinned должны оставаться сверху без скрытия остальной истории.
 - Покрыть хотя бы чистую query/pagination часть тестами; UI flow можно оставить manual checklist.
-
-### CH-AUDIT-005 - Image preview может уходить за экран
-
-Приоритет: P2.
-
-`_show_image_preview()` выбирает preview справа от popup, иначе слева. Если popup и preview не помещаются одновременно в work area, левая позиция может уйти за границу экрана. Риск выше на маленьких экранах, remote desktop, portrait layouts, крупном scaling и multi-monitor layouts с отрицательными координатами.
-
-Что сделать:
-- Вынести расчет позиции preview в чистый helper.
-- После выбора стороны clamp-ить `px` в диапазон work area с margin.
-- Если места мало, показывать preview поверх popup/ниже курсора с тем же clamp.
-- Добавить тесты helper-а на narrow work area, отрицательные координаты и preview шире доступного места.
 
 ### CH-AUDIT-007 - Ошибки Win32 listener/hotkey не видны пользователю
 
@@ -117,20 +105,11 @@ Long text хранит `original_content_len` и `truncated`, но `content` о�
 
 Приоритет: P3.
 
-Storage, image helper logic и autostart command handling уже имеют базовые `unittest` tests, но остаются нетестированными preview positioning, paste result flow, hotkey/listener status и clipboard retry policy.
+Storage, image helper logic, popup preview positioning и autostart command handling уже имеют базовые `unittest` tests, но остаются нетестированными paste result flow, hotkey/listener status и clipboard retry policy.
 
 Что сделать:
-- Вынести preview positioning helper и покрыть geometry tests.
 - Для paste/status flow добавить тестируемые result objects без реального `SendInput`.
 - Для Win32 clipboard оставить manual smoke checklist, если автоматизация окажется слишком тяжелой.
-
-### CH-AUDIT-010 - Оставшийся мелкий мертвый/лишний код
-
-Приоритет: P3.
-
-Что удалить при ближайшем touching соответствующих файлов:
-- `ACCENT_DIM` объявлен, но не используется.
-- `self._master` сохраняется, но дальше не читается.
 
 ## Проверки для будущих правок
 
@@ -143,9 +122,8 @@ Storage, image helper logic и autostart command handling уже имеют ба
 
 1. Full history pagination/lazy loading (`CH-AUDIT-004`).
 2. Paste result flow и visible status foundation (`CH-AUDIT-012`, затем `CH-AUDIT-007`).
-3. Preview positioning helper (`CH-AUDIT-005`).
-4. Clipboard retry/status (`CH-AUDIT-013`).
-5. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
-6. Truncated long-text policy (`CH-AUDIT-018`).
-7. Privacy controls (`CH-AUDIT-009`).
-8. Дополнительные tests и cleanup (`CH-AUDIT-008`, `CH-AUDIT-010`).
+3. Clipboard retry/status (`CH-AUDIT-013`).
+4. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
+5. Truncated long-text policy (`CH-AUDIT-018`).
+6. Privacy controls (`CH-AUDIT-009`).
+7. Дополнительные tests (`CH-AUDIT-008`).

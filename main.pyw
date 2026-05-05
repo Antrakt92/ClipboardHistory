@@ -32,7 +32,7 @@ import customtkinter
 # Fix GetForegroundWindow to return pointer-sized HWND (not truncated c_int on x64)
 ctypes.windll.user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
 
-from app.config import DB_PATH, ICON_PATH
+from app.config import DB_PATH, ICON_PATH, ensure_data_dir, migrate_legacy_db
 from app.database import Database
 from app.clipboard_monitor import ClipboardMonitor
 from app.hotkey_manager import HotkeyManager
@@ -45,6 +45,9 @@ from app.create_icon import create_icon
 
 class ClipboardHistoryApp:
     def __init__(self):
+        ensure_data_dir()
+        migrate_legacy_db()
+
         if not os.path.exists(ICON_PATH):
             create_icon()
 
@@ -93,7 +96,7 @@ class ClipboardHistoryApp:
         if content_type == "image":
             self.db.add_entry("", content_type, image_data=content)
         elif content and content.strip():
-            self.db.add_entry(content.strip(), content_type)
+            self.db.add_entry(content, content_type)
 
     def _show_popup_from_tray(self):
         # Capture foreground window on the tray thread before Tk shifts focus

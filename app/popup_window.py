@@ -474,9 +474,14 @@ class PopupWindow(customtkinter.CTkToplevel):
         time_lbl.pack(side="left")
         clickable.append(time_lbl)
 
-        if not is_image and content_len >= LARGE_TEXT_THRESHOLD:
+        if not is_image and (content_len >= LARGE_TEXT_THRESHOLD or entry.get("truncated")):
+            meta_parts = []
+            if content_len >= LARGE_TEXT_THRESHOLD:
+                meta_parts.append(f"{content_len:,} chars")
+            if entry.get("truncated"):
+                meta_parts.append("truncated")
             chars_lbl = tk.Label(
-                bot, text=f"  \u00b7  {content_len:,} chars",
+                bot, text="  \u00b7  " + " \u00b7 ".join(meta_parts),
                 font=_FONT_SMALL, fg=TEXT_DIM, bg=normal_bg
             )
             chars_lbl.pack(side="left")

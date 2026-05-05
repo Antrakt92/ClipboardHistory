@@ -6,25 +6,12 @@
 
 ## Текущий фокус
 
-1. Дать пользователю доступ ко всей сохраненной истории, а не только к первым 30 элементам.
-2. Сделать Win32/paste failures видимыми и проверяемыми, чтобы приложение не выглядело рабочим при сломанном listener/hotkey/paste.
-3. Укрепить UX вокруг file clipboard и truncated text.
-4. Добавить privacy controls для clipboard manager сценариев.
-5. Продолжить вынос чистой логики в тестируемые helpers без лишних дубликатов.
+1. Сделать Win32/paste failures видимыми и проверяемыми, чтобы приложение не выглядело рабочим при сломанном listener/hotkey/paste.
+2. Укрепить UX вокруг file clipboard и truncated text.
+3. Добавить privacy controls для clipboard manager сценариев.
+4. Продолжить вынос чистой логики в тестируемые helpers без лишних дубликатов.
 
 ## Открытые находки
-
-### CH-AUDIT-004 - UI показывает только 30 записей из 500
-
-Приоритет: P2.
-
-База хранит до `MAX_HISTORY_SIZE = 500`, README обещает "up to 500 entries", но popup запрашивает только `get_history(limit=30, ...)`. Пагинации, infinite scroll, "load more" или настройки лимита нет. Поиск тоже ограничен 30 результатами после фильтрации.
-
-Что сделать:
-- Добавить lazy loading через `offset` при скролле вниз или кнопку "Load more".
-- Показывать общий count отдельно от currently loaded count.
-- Проверить UX для pinned entries: pinned должны оставаться сверху без скрытия остальной истории.
-- Покрыть хотя бы чистую query/pagination часть тестами; UI flow можно оставить manual checklist.
 
 ### CH-AUDIT-007 - Ошибки Win32 listener/hotkey не видны пользователю
 
@@ -120,10 +107,9 @@ Storage, image helper logic, popup preview positioning и autostart command hand
 
 ## Сводка для следующей сессии
 
-1. Full history pagination/lazy loading (`CH-AUDIT-004`).
-2. Paste result flow и visible status foundation (`CH-AUDIT-012`, затем `CH-AUDIT-007`).
-3. Clipboard retry/status (`CH-AUDIT-013`).
-4. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
-5. Truncated long-text policy (`CH-AUDIT-018`).
-6. Privacy controls (`CH-AUDIT-009`).
-7. Дополнительные tests (`CH-AUDIT-008`).
+1. Paste result flow и visible status foundation (`CH-AUDIT-012`, затем `CH-AUDIT-007`).
+2. Clipboard retry/status (`CH-AUDIT-013`).
+3. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
+4. Truncated long-text policy (`CH-AUDIT-018`).
+5. Privacy controls (`CH-AUDIT-009`).
+6. Дополнительные tests (`CH-AUDIT-008`).

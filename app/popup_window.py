@@ -51,6 +51,7 @@ LARGE_TEXT_THRESHOLD = 500
 _FONT_ITEM = ("Segoe UI", 11)
 _FONT_SMALL = ("Segoe UI", 9)
 _FONT_SECTION = ("Segoe UI", 8)
+HISTORY_PAGE_SIZE = 30
 PREVIEW_MARGIN = 10
 PREVIEW_GAP = 8
 
@@ -145,6 +146,26 @@ def _calculate_preview_position(
     )
 
 
+def _clamp_history_limit(limit, total, page_size=HISTORY_PAGE_SIZE):
+    limit = max(page_size, limit)
+    if total <= page_size:
+        return page_size
+    return min(limit, total)
+
+
+def _format_history_count(loaded, total):
+    if total <= 0:
+        return "0 items"
+    loaded = min(max(loaded, 0), total)
+    if loaded >= total:
+        return f"{total} item{'s' if total != 1 else ''}"
+    return f"{loaded}/{total} items"
+
+
+def _should_show_load_more(loaded, total):
+    return total > 0 and loaded < total
+
+
 def _set_bg_recursive(widget, bg):
     """Set background color on widget and all descendants."""
     try:
@@ -172,6 +193,9 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._item_data = []
         self._search_after_id = None
         self._last_search_text = ""
+        self._loaded_limit = HISTORY_PAGE_SIZE
+        self._current_search_query = None
+        self._total_items = 0
         self._drag_x = 0
         self._drag_y = 0
         self._thumb_cache = {}
@@ -180,6 +204,7 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._preview_photo = None
         self._preview_entry_id = None
         self._confirm_clear = False
+        self._load_more_btn = None
         self._clear_btn = None
         self._focus_check_id = None
 
@@ -237,7 +262,7 @@ class PopupWindow(customtkinter.CTkToplevel):
             pass
 
         # Load fresh data
-        self._load_items()
+        self._load_items(reset=True)
 
         # Reset scroll to top
         try:
@@ -389,6 +414,13 @@ class PopupWindow(customtkinter.CTkToplevel):
         )
         self.count_label.pack(side="left")
 
+        self._load_more_btn = customtkinter.CTkButton(
+            footer, text="Load more", width=76, height=22,
+            font=("Segoe UI", 10), fg_color="transparent",
+            hover_color=SURFACE_HOVER, text_color=TEXT_SECONDARY,
+            corner_radius=4, command=self._load_more_items
+        )
+
         self._clear_btn = customtkinter.CTkButton(
             footer, text="Clear all", width=60, height=22,
             font=("Segoe UI", 10), fg_color="transparent",
@@ -401,11 +433,21 @@ class PopupWindow(customtkinter.CTkToplevel):
     # Item list (all plain tk for speed)
     # ------------------------------------------------------------------
 
-    def _load_items(self, search_query=None):
+    def _load_items(self, search_query=None, reset=False, preserve_scroll=False):
         if not self._visible:
             return
 
         self._hide_image_preview()
+        scroll_position = None
+        if preserve_scroll:
+            try:
+                scroll_position = self._canvas.yview()[0]
+            except Exception:
+                scroll_position = None
+
+        if reset:
+            self._current_search_query = search_query
+            self._loaded_limit = HISTORY_PAGE_SIZE
 
         for widget in self._items_inner.winfo_children():
             widget.destroy()
@@ -417,7 +459,12 @@ class PopupWindow(customtkinter.CTkToplevel):
         old_cache = self._thumb_cache
         self._thumb_cache = {}
 
-        entries = self.db.get_history(limit=30, search_query=search_query)
+        self._total_items = self.db.get_history_count(self._current_search_query)
+        self._loaded_limit = _clamp_history_limit(self._loaded_limit, self._total_items)
+        entries = self.db.get_history(
+            limit=self._loaded_limit,
+            search_query=self._current_search_query,
+        )
 
         if not entries:
             empty = tk.Label(
@@ -426,7 +473,7 @@ class PopupWindow(customtkinter.CTkToplevel):
                 font=("Segoe UI", 12), fg=TEXT_DIM, bg=BG, justify="center"
             )
             empty.pack(pady=50)
-            self.count_label.configure(text="0 items")
+            self._update_history_footer(0)
             return
 
         has_pinned = any(e["pinned"] for e in entries)
@@ -451,8 +498,36 @@ class PopupWindow(customtkinter.CTkToplevel):
             self._item_frames.append(frame)
             self._item_data.append(entry)
 
-        n = len(entries)
-        self.count_label.configure(text=f"{n} item{'s' if n != 1 else ''}")
+        self._update_history_footer(len(entries))
+        if scroll_position is not None:
+            try:
+                self._canvas.update_idletasks()
+                self._canvas.yview_moveto(scroll_position)
+            except Exception:
+                pass
+
+    def _update_history_footer(self, loaded):
+        self.count_label.configure(text=_format_history_count(loaded, self._total_items))
+        if _should_show_load_more(loaded, self._total_items):
+            try:
+                self._load_more_btn.configure(state="normal")
+                if not self._load_more_btn.winfo_manager():
+                    self._load_more_btn.pack(side="right", padx=(0, 6))
+            except Exception:
+                pass
+        else:
+            try:
+                self._load_more_btn.pack_forget()
+            except Exception:
+                pass
+
+    def _load_more_items(self):
+        if not self._visible:
+            return
+        if self._loaded_limit >= self._total_items:
+            return
+        self._loaded_limit += HISTORY_PAGE_SIZE
+        self._load_items(reset=False, preserve_scroll=True)
 
     def _create_item_widget(self, entry, index, old_thumb_cache=None):
         is_pinned = entry["pinned"]
@@ -721,7 +796,7 @@ class PopupWindow(customtkinter.CTkToplevel):
             query = self.search_entry.get().strip() or None
         except Exception:
             return
-        self._load_items(query)
+        self._load_items(query, reset=True)
 
     # ------------------------------------------------------------------
     # Navigation
@@ -813,20 +888,17 @@ class PopupWindow(customtkinter.CTkToplevel):
 
     def _toggle_pin(self, entry_id):
         self.db.toggle_pin(entry_id)
-        search = self.search_entry.get().strip() or None
-        self._load_items(search)
+        self._load_items(reset=False)
 
     def _delete_item(self, entry_id):
         self.db.delete_entry(entry_id)
-        search = self.search_entry.get().strip() or None
-        self._load_items(search)
+        self._load_items(reset=False)
 
     def _clear_all(self):
         if self._confirm_clear:
             self.db.clear_all()
             self._confirm_clear = False
-            search = self.search_entry.get().strip() or None
-            self._load_items(search)
+            self._load_items(reset=False)
         else:
             self._confirm_clear = True
             self._clear_btn.configure(text="Sure?", text_color=DANGER)

@@ -281,43 +281,50 @@ class Database:
         self._maybe_vacuum()
         return True
 
+    @staticmethod
+    def _history_search_filter(search_query):
+        if not search_query:
+            return "", ()
+
+        escaped = search_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        return (
+            "WHERE content LIKE ? ESCAPE '\\' "
+            "OR (content_type = 'image' AND preview LIKE ? ESCAPE '\\')",
+            (pattern, pattern),
+        )
+
     def get_history(self, limit=50, offset=0, search_query=None):
         with self.lock:
             if self._closed:
                 return []
-            if search_query:
-                # Escape LIKE wildcards in user input
-                escaped = search_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                pattern = f"%{escaped}%"
-                cursor = self.conn.execute(
-                    """SELECT id,
-                              CASE
-                                  WHEN content_type = 'text'
-                                      THEN COALESCE(NULLIF(original_content_len, 0), LENGTH(content))
-                                  ELSE LENGTH(content)
-                              END as content_len,
-                              content_type, timestamp, pinned, preview, image_hash, truncated
-                       FROM clipboard_history
-                       WHERE content LIKE ? ESCAPE '\\' OR (content_type = 'image' AND preview LIKE ? ESCAPE '\\')
-                       ORDER BY pinned DESC, timestamp DESC
-                       LIMIT ? OFFSET ?""",
-                    (pattern, pattern, limit, offset)
-                )
-            else:
-                cursor = self.conn.execute(
-                    """SELECT id,
-                              CASE
-                                  WHEN content_type = 'text'
-                                      THEN COALESCE(NULLIF(original_content_len, 0), LENGTH(content))
-                                  ELSE LENGTH(content)
-                              END as content_len,
-                              content_type, timestamp, pinned, preview, image_hash, truncated
-                       FROM clipboard_history
-                       ORDER BY pinned DESC, timestamp DESC
-                       LIMIT ? OFFSET ?""",
-                    (limit, offset)
-                )
+            where_clause, params = self._history_search_filter(search_query)
+            cursor = self.conn.execute(
+                f"""SELECT id,
+                          CASE
+                              WHEN content_type = 'text'
+                                  THEN COALESCE(NULLIF(original_content_len, 0), LENGTH(content))
+                              ELSE LENGTH(content)
+                          END as content_len,
+                          content_type, timestamp, pinned, preview, image_hash, truncated
+                   FROM clipboard_history
+                   {where_clause}
+                   ORDER BY pinned DESC, timestamp DESC
+                   LIMIT ? OFFSET ?""",
+                (*params, limit, offset)
+            )
             return [dict(row) for row in cursor.fetchall()]
+
+    def get_history_count(self, search_query=None):
+        with self.lock:
+            if self._closed:
+                return 0
+            where_clause, params = self._history_search_filter(search_query)
+            cursor = self.conn.execute(
+                f"SELECT COUNT(*) as cnt FROM clipboard_history {where_clause}",
+                params,
+            )
+            return cursor.fetchone()["cnt"]
 
     def get_entry(self, entry_id):
         with self.lock:

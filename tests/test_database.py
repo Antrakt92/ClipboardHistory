@@ -284,6 +284,80 @@ class DatabaseTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_history_count_counts_all_rows_and_returns_zero_when_closed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with db.lock:
+                    insert_text_entry(db, "one")
+                    insert_text_entry(db, "two")
+                    db.conn.commit()
+
+                self.assertEqual(2, db.get_history_count())
+            finally:
+                db.close()
+
+            self.assertEqual(0, db.get_history_count())
+
+    def test_history_search_count_uses_literal_wildcards_and_backslash(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with db.lock:
+                    insert_text_entry(db, "literal % percent")
+                    insert_text_entry(db, "literal percent")
+                    insert_text_entry(db, "under_score")
+                    insert_text_entry(db, r"back\slash")
+                    db.conn.commit()
+
+                for query, expected_preview in (
+                    ("%", "literal % percent"),
+                    ("_", "under_score"),
+                    ("\\", r"back\slash"),
+                ):
+                    with self.subTest(query=query):
+                        history = db.get_history(limit=10, search_query=query)
+                        self.assertEqual(1, db.get_history_count(query))
+                        self.assertEqual([expected_preview], [row["preview"] for row in history])
+            finally:
+                db.close()
+
+    def test_history_pagination_preserves_pinned_timestamp_order(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with db.lock:
+                    insert_text_entry(db, "unpinned-newest", pinned=0, timestamp=100)
+                    insert_text_entry(db, "pinned-old", pinned=1, timestamp=1)
+                    insert_text_entry(db, "pinned-new", pinned=1, timestamp=2)
+                    db.conn.commit()
+
+                first_page = db.get_history(limit=2, offset=0)
+                second_page = db.get_history(limit=2, offset=2)
+
+                self.assertEqual(["pinned-new", "pinned-old"], [row["preview"] for row in first_page])
+                self.assertEqual(["unpinned-newest"], [row["preview"] for row in second_page])
+            finally:
+                db.close()
+
+    def test_history_pagination_reaches_unpinned_after_many_pinned_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with db.lock:
+                    for i in range(35):
+                        insert_text_entry(db, f"pinned-{i}", pinned=1, timestamp=i)
+                    insert_text_entry(db, "unpinned-a", pinned=0, timestamp=100)
+                    insert_text_entry(db, "unpinned-b", pinned=0, timestamp=101)
+                    db.conn.commit()
+
+                unpinned_page = db.get_history(limit=5, offset=35)
+
+                self.assertEqual(["unpinned-b", "unpinned-a"], [row["preview"] for row in unpinned_page])
+                self.assertEqual(37, db.get_history_count())
+            finally:
+                db.close()
+
     def test_config_import_has_no_filesystem_side_effects(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             env = os.environ.copy()

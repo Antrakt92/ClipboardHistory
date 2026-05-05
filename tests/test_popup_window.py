@@ -1,6 +1,14 @@
 import unittest
 
-from app.popup_window import PREVIEW_GAP, PREVIEW_MARGIN, _calculate_preview_position
+from app.popup_window import (
+    HISTORY_PAGE_SIZE,
+    PREVIEW_GAP,
+    PREVIEW_MARGIN,
+    _calculate_preview_position,
+    _clamp_history_limit,
+    _format_history_count,
+    _should_show_load_more,
+)
 
 
 class PopupPreviewPositionTests(unittest.TestCase):
@@ -91,6 +99,28 @@ class PopupPreviewPositionTests(unittest.TestCase):
 
         self.assertEqual(PREVIEW_MARGIN, top_y)
         self.assertEqual(600 - 100 - PREVIEW_MARGIN, bottom_y)
+
+
+class PopupHistoryFooterTests(unittest.TestCase):
+    def test_history_count_label_formats_loaded_and_total(self):
+        self.assertEqual("0 items", _format_history_count(0, 0))
+        self.assertEqual("1 item", _format_history_count(1, 1))
+        self.assertEqual("30/87 items", _format_history_count(30, 87))
+        self.assertEqual("87 items", _format_history_count(87, 87))
+        self.assertEqual("87 items", _format_history_count(120, 87))
+
+    def test_load_more_visibility_depends_on_loaded_total(self):
+        self.assertFalse(_should_show_load_more(0, 0))
+        self.assertFalse(_should_show_load_more(30, 30))
+        self.assertTrue(_should_show_load_more(30, 31))
+        self.assertTrue(_should_show_load_more(60, 87))
+        self.assertFalse(_should_show_load_more(87, 87))
+
+    def test_history_limit_clamps_after_mutations(self):
+        self.assertEqual(HISTORY_PAGE_SIZE, _clamp_history_limit(1, 0))
+        self.assertEqual(HISTORY_PAGE_SIZE, _clamp_history_limit(1, 20))
+        self.assertEqual(60, _clamp_history_limit(60, 87))
+        self.assertEqual(87, _clamp_history_limit(120, 87))
 
 
 if __name__ == "__main__":

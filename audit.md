@@ -22,12 +22,12 @@
 - `python -m ruff check .` - проходит.
 - `git diff --check` - проходит.
 - Историческая smoke-проверка `Database(temp_path)` на свежем файле падала с `sqlite3.OperationalError: database table is locked`; это подтвердило CH-AUDIT-001, исправлено 2026-05-05.
-- Расчет raw DIB размеров для типовых скриншотов подтверждает, что 1080p+ скриншоты превышают текущий 5 MiB лимит до PNG-конвертации; это подтверждает CH-AUDIT-003.
+- Исторический расчет raw DIB размеров для типовых скриншотов подтвердил, что 1080p+ скриншоты превышали старый 5 MiB лимит до PNG-конвертации; это подтвердило CH-AUDIT-003, исправлено 2026-05-05.
 - Исторический deep probe с объектом `Database`, созданным в обход startup-багa, подтвердил silent truncation + false dedup для разных текстов длиннее `MAX_CONTENT_LENGTH`; это подтвердило CH-AUDIT-011, исправлено 2026-05-05.
 - Static/order probe подтвердил, что `touch_entry()` вызывается до paste, а результат `SendInput()` игнорируется; это подтверждает CH-AUDIT-012.
 - Исторический probe `_maybe_vacuum()` с failing connection подтвердил, что retry flag сбрасывался до успешного `VACUUM`; это подтвердило CH-AUDIT-014, исправлено 2026-05-05.
-- Реализация 2026-05-05 добавила `unittest` regression suite для fresh DB startup, legacy migration, corrupt DB quarantine/recreate, exact whitespace preservation, long-text hash dedup, failed/successful `VACUUM` и side-effect-free `config` import.
-- Новый probe 2026-05-05 подтвердил, что hourly `_maybe_expire()` удаляет старые rows, но не выставляет `_needs_vacuum`; это подтверждает CH-AUDIT-017.
+- Реализация 2026-05-05 добавила `unittest` regression suite для fresh DB startup, legacy migration, corrupt DB quarantine/recreate, exact whitespace preservation, long-text hash dedup, failed/successful `VACUUM`, hourly expiration vacuum marker, side-effect-free `config` import и image DIB/PNG limits.
+- Новый probe 2026-05-05 подтвердил, что hourly `_maybe_expire()` удалял старые rows, но не выставлял `_needs_vacuum`; это подтвердило CH-AUDIT-017, исправлено 2026-05-05.
 - Новый probe 2026-05-05 подтвердил, что search по хвосту truncated long text не находит запись, хотя `content_len` показывает исходную длину; это подтверждает CH-AUDIT-018.
 
 ## Критичные и высокие находки
@@ -62,10 +62,10 @@
 
 ### CH-AUDIT-003 - Большинство полноэкранных скриншотов 1080p+ silently не сохраняются
 
-Статус: подтверждено расчетом и кодом.
+Статус: исправлено 2026-05-05; покрыто `tests/test_clipboard_monitor.py`.
 Приоритет: P1.
 
-В `clipboard_monitor._read_clipboard()` лимит `MAX_IMAGE_BYTES = 5 MiB` применяется к raw CF_DIB до PNG-конвертации (`app/clipboard_monitor.py:190-196`, `app/config.py:39`). Raw DIB для 1920x1080 32-bit занимает примерно 7.91 MiB, для 2560x1440 - примерно 14.06 MiB, для 4K - примерно 31.64 MiB. Поэтому обычные скриншоты экрана на 1080p и выше будут пропущены еще до `_dib_to_png()`, хотя итоговый PNG часто может быть существенно меньше.
+До исправления в `clipboard_monitor._read_clipboard()` лимит `MAX_IMAGE_BYTES = 5 MiB` применялся к raw CF_DIB до PNG-конвертации. Raw DIB для 1920x1080 32-bit занимает примерно 7.91 MiB, для 2560x1440 - примерно 14.06 MiB, для 4K - примерно 31.64 MiB. Поэтому обычные скриншоты экрана на 1080p и выше пропускались еще до `_dib_to_png()`, хотя итоговый PNG часто может быть существенно меньше.
 
 Пользовательский эффект: README обещает screenshots/copied images (`README.md:10-12`), но типичный fullscreen screenshot на современном мониторе не попадет в историю без ошибки в UI.
 
@@ -73,6 +73,8 @@
 - Разделить лимит на raw input safety limit и stored PNG limit.
 - Конвертировать DIB в PNG, затем проверять размер сохраняемого PNG.
 - Для защиты памяти добавить отдельный лимит по пикселям или более высокий raw limit с логированием причины пропуска.
+
+Итоговое исправление: `MAX_IMAGE_BYTES` теперь ограничивает сохраненный PNG (12 MiB), `MAX_RAW_IMAGE_BYTES` ограничивает raw DIB до копирования (64 MiB), `MAX_IMAGE_PIXELS` отсекает oversized headers до PIL-конвертации. `Database._add_image_entry()` также отказывает oversized PNG, если image entry добавят в обход monitor.
 
 ### CH-AUDIT-011 - Длинный текст тихо обрезается и может ложно дедуплицироваться
 
@@ -178,10 +180,10 @@
 
 ### CH-AUDIT-008 - Нет тестового каркаса для критичной логики
 
-Статус: частично исправлено 2026-05-05: добавлен `unittest` каркас для `Database`; GUI/Win32 tests еще отсутствуют.
+Статус: частично исправлено 2026-05-05: добавлен `unittest` каркас для `Database` и чистых image helpers; GUI/Win32 integration tests еще отсутствуют.
 Приоритет: P3.
 
-В репозитории нет `tests/`, CI или минимальных unit tests. При этом есть логика, которую можно тестировать без GUI: SQLite lifecycle, deduplication, cleanup, expiration, text preservation, DIB header conversion, autostart command building. Предыдущие аудиты уже правили много x64/Win32 edge cases, значит regression coverage здесь особенно ценна.
+В репозитории появился базовый `unittest` каркас для storage и image helper logic, но CI и интеграционные GUI/Win32 проверки все еще отсутствуют. При этом остается логика, которую можно тестировать без реального tray/Tk: autostart command building, preview positioning, paste status flow и часть clipboard retry policy. Предыдущие аудиты уже правили много x64/Win32 edge cases, значит regression coverage здесь особенно ценна.
 
 Рекомендуемое исправление:
 - Добавить `pytest` и первые тесты для `Database`.
@@ -206,7 +208,6 @@
 Приоритет: P3.
 
 - `ACCENT_DIM` объявлен, но не используется (`app/popup_window.py:33`).
-- `WM_DESTROY` объявлен, но не используется (`app/clipboard_monitor.py:48`).
 - `self._master` сохраняется, но дальше не читается (`app/popup_window.py:118`).
 
 Рекомендуемое исправление: удалить при ближайшем touching этих файлов, чтобы не делать отдельный шумный commit.
@@ -254,10 +255,10 @@
 
 ### CH-AUDIT-017 - Hourly expiration удаляет rows без vacuum retry marker
 
-Статус: подтверждено локальным probe 2026-05-05.
+Статус: исправлено 2026-05-05; покрыто `tests/test_database.py`.
 Приоритет: P3.
 
-После исправления CH-AUDIT-014 startup `_expire_old_entries()` уже выставляет `_needs_vacuum`, если удалил старые rows. Но hourly path `_maybe_expire()` (`app/database.py`) все еще выполняет `DELETE FROM clipboard_history WHERE pinned = 0 AND timestamp < ?` и `commit()`, не проверяя `rowcount` и не выставляя `_needs_vacuum`. Probe: старая row была удалена (`remaining_old=0`), но `needs_vacuum=False`.
+После исправления CH-AUDIT-014 startup `_expire_old_entries()` уже выставлял `_needs_vacuum`, если удалил старые rows. Но hourly path `_maybe_expire()` раньше выполнял `DELETE FROM clipboard_history WHERE pinned = 0 AND timestamp < ?` и `commit()`, не проверяя `rowcount` и не выставляя `_needs_vacuum`. Probe: старая row была удалена (`remaining_old=0`), но `needs_vacuum=False`.
 
 Пользовательский эффект: при долгой работе приложения старые unpinned entries могут удаляться по retention, но SQLite-файл не будет помечен на reclaim до следующего delete/cleanup, который выставит `_needs_vacuum`.
 
@@ -289,14 +290,12 @@
 
 ## Задачи на следующую сессию
 
-1. Исправить CH-AUDIT-003: переработать image size limits так, чтобы 1080p/1440p screenshots сохранялись, но память была защищена.
-2. Исправить CH-AUDIT-017: hourly `_maybe_expire()` должен выставлять `_needs_vacuum` при удалении rows; добавить unit test.
-3. Спроектировать доступ к полной истории: pagination/lazy load для 500 записей, корректный count, проверка pinned + search UX.
-4. Укрепить Win32 status handling: visible warning для hotkey conflict, listener registration failure, missed clipboard reads и failed paste.
-5. Исправить paste result flow: проверять `SendInput` count, не делать `touch_entry()` до подтвержденного paste attempt.
-6. Исправить preview positioning clamp для маленьких work area и multi-monitor layouts.
-7. Починить stale autostart detection: проверять registry value против текущего `SCRIPT_PATH`/команды.
-8. Улучшить truncated long-text UX/search policy: явно показывать storage cap и решить, нужен ли full storage/search для длинных текстов.
-9. Обсудить/добавить privacy controls: pause recording, stronger clear, retention настройки, возможно app denylist.
-10. Расширить тесты за пределы `Database`: autostart command normalization, preview positioning helper, clipboard/paste smoke checklist.
-11. При ближайших правках удалить мелкий мертвый код из CH-AUDIT-010.
+1. Спроектировать доступ к полной истории: pagination/lazy load для 500 записей, корректный count, проверка pinned + search UX.
+2. Укрепить Win32 status handling: visible warning для hotkey conflict, listener registration failure, missed clipboard reads и failed paste.
+3. Исправить paste result flow: проверять `SendInput` count, не делать `touch_entry()` до подтвержденного paste attempt.
+4. Исправить preview positioning clamp для маленьких work area и multi-monitor layouts.
+5. Починить stale autostart detection: проверять registry value против текущего `SCRIPT_PATH`/команды.
+6. Улучшить truncated long-text UX/search policy: явно показывать storage cap и решить, нужен ли full storage/search для длинных текстов.
+7. Обсудить/добавить privacy controls: pause recording, stronger clear, retention настройки, возможно app denylist.
+8. Расширить тесты за пределы storage/image helpers: autostart command normalization, preview positioning helper, clipboard/paste smoke checklist.
+9. При ближайших правках удалить оставшийся мелкий мертвый код из CH-AUDIT-010.

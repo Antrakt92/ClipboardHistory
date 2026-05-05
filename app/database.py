@@ -5,7 +5,7 @@ import sqlite3
 import threading
 import time
 
-from app.config import DB_PATH, MAX_HISTORY_SIZE, MAX_CONTENT_LENGTH, PREVIEW_LENGTH
+from app.config import DB_PATH, MAX_HISTORY_SIZE, MAX_CONTENT_LENGTH, MAX_IMAGE_BYTES, PREVIEW_LENGTH
 
 log = logging.getLogger(__name__)
 
@@ -245,6 +245,13 @@ class Database:
     def _add_image_entry(self, image_data):
         if not image_data:
             return False
+        if len(image_data) > MAX_IMAGE_BYTES:
+            log.debug(
+                "Image entry too large to store (%d bytes > %d), skipping",
+                len(image_data),
+                MAX_IMAGE_BYTES,
+            )
+            return False
 
         img_hash = hashlib.sha256(image_data).hexdigest()
 
@@ -406,11 +413,13 @@ class Database:
             return
         self._last_expire_time = now
         cutoff = now - AUTO_EXPIRE_DAYS * 86400
-        self.conn.execute(
+        cursor = self.conn.execute(
             "DELETE FROM clipboard_history WHERE pinned = 0 AND timestamp < ?",
             (cutoff,)
         )
         self.conn.commit()
+        if cursor.rowcount > 0:
+            self._needs_vacuum = True
 
     def _maybe_vacuum(self):
         """Run VACUUM at most once per day to reclaim space from deleted blobs.

@@ -9,7 +9,7 @@ import time as _time
 import win32clipboard
 from PIL import Image
 
-from app.config import MAX_IMAGE_BYTES
+from app.config import MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_RAW_IMAGE_BYTES
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +45,6 @@ user32.UnregisterClassW.argtypes = [ctypes.wintypes.LPCWSTR, ctypes.wintypes.HIN
 user32.UnregisterClassW.restype = ctypes.wintypes.BOOL
 
 WM_CLIPBOARDUPDATE = 0x031D
-WM_DESTROY = 0x0002
 WM_QUIT = 0x0012
 
 WNDPROC = ctypes.WINFUNCTYPE(
@@ -192,7 +191,7 @@ class ClipboardMonitor:
                     CF_DIB = 8
                     if win32clipboard.IsClipboardFormatAvailable(CF_DIB):
                         dib_data = win32clipboard.GetClipboardData(CF_DIB)
-                        if dib_data and len(dib_data) <= MAX_IMAGE_BYTES:
+                        if self._is_raw_dib_size_allowed(dib_data):
                             raw_dib = bytes(dib_data)
             finally:
                 win32clipboard.CloseClipboard()
@@ -206,11 +205,78 @@ class ClipboardMonitor:
                 if paths_text.strip():
                     self.on_new_content(paths_text, "text")
             elif raw_dib:
-                png_bytes = self._dib_to_png(raw_dib)
+                png_bytes = self._process_dib_image(raw_dib)
                 if png_bytes:
                     self.on_new_content(png_bytes, "image")
         except Exception:
             log.exception("Error reading clipboard")
+
+    @staticmethod
+    def _is_raw_dib_size_allowed(dib_data):
+        if not dib_data:
+            return False
+        raw_size = len(dib_data)
+        if raw_size > MAX_RAW_IMAGE_BYTES:
+            log.debug(
+                "DIB data too large before conversion (%d bytes > %d), skipping",
+                raw_size,
+                MAX_RAW_IMAGE_BYTES,
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _dib_dimensions(dib_data):
+        if len(dib_data) < 40:
+            log.debug("DIB data too short (%d bytes), skipping", len(dib_data))
+            return None
+
+        bi_size = struct.unpack_from('<I', dib_data, 0)[0]
+        if bi_size < 40:
+            log.debug("Invalid DIB header size %d, skipping", bi_size)
+            return None
+
+        width = struct.unpack_from('<i', dib_data, 4)[0]
+        height = struct.unpack_from('<i', dib_data, 8)[0]
+        if width <= 0 or height == 0:
+            log.debug("Invalid DIB dimensions %dx%d, skipping", width, height)
+            return None
+        return width, abs(height)
+
+    @classmethod
+    def _is_dib_pixel_count_allowed(cls, dib_data):
+        dimensions = cls._dib_dimensions(dib_data)
+        if dimensions is None:
+            return False
+        width, height = dimensions
+        pixel_count = width * height
+        if pixel_count > MAX_IMAGE_PIXELS:
+            log.debug(
+                "DIB image too large (%d pixels > %d), skipping",
+                pixel_count,
+                MAX_IMAGE_PIXELS,
+            )
+            return False
+        return True
+
+    @classmethod
+    def _process_dib_image(cls, dib_data):
+        if not cls._is_raw_dib_size_allowed(dib_data):
+            return None
+        if not cls._is_dib_pixel_count_allowed(dib_data):
+            return None
+
+        png_bytes = cls._dib_to_png(dib_data)
+        if not png_bytes:
+            return None
+        if len(png_bytes) > MAX_IMAGE_BYTES:
+            log.debug(
+                "PNG image too large after conversion (%d bytes > %d), skipping",
+                len(png_bytes),
+                MAX_IMAGE_BYTES,
+            )
+            return None
+        return png_bytes
 
     @staticmethod
     def _dib_to_png(dib_data):

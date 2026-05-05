@@ -8,7 +8,7 @@ import time
 import unittest
 from pathlib import Path
 
-from app.config import MAX_CONTENT_LENGTH
+from app.config import MAX_CONTENT_LENGTH, MAX_IMAGE_BYTES
 from app.database import Database
 
 
@@ -167,6 +167,43 @@ class DatabaseTests(unittest.TestCase):
         db._last_vacuum_time = time.time() - 90000
         Database._maybe_vacuum(db)
         self.assertFalse(db._needs_vacuum)
+
+    def test_hourly_expiration_sets_vacuum_flag_when_rows_are_deleted(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                old_timestamp = time.time() - 31 * 86400
+                db.conn.execute(
+                    """INSERT INTO clipboard_history (content, content_type, timestamp, pinned, preview)
+                       VALUES ('old', 'text', ?, 0, 'old')""",
+                    (old_timestamp,)
+                )
+                db.conn.execute(
+                    """INSERT INTO clipboard_history (content, content_type, timestamp, pinned, preview)
+                       VALUES ('old pinned', 'text', ?, 1, 'old pinned')""",
+                    (old_timestamp,)
+                )
+                db.conn.commit()
+                db._needs_vacuum = False
+                db._last_expire_time = time.time() - 3700
+
+                with db.lock:
+                    db._maybe_expire()
+
+                history = db.get_history(limit=10)
+                self.assertEqual(["old pinned"], [entry["preview"] for entry in history])
+                self.assertTrue(db._needs_vacuum)
+            finally:
+                db.close()
+
+    def test_image_entries_over_storage_cap_are_skipped(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                self.assertFalse(db.add_entry("", "image", b"x" * (MAX_IMAGE_BYTES + 1)))
+                self.assertEqual([], db.get_history())
+            finally:
+                db.close()
 
     def test_config_import_has_no_filesystem_side_effects(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -7,10 +7,11 @@
 ## Текущий фокус
 
 1. Дать пользователю доступ ко всей сохраненной истории, а не только к первым 30 элементам.
-2. Сделать Win32/paste failures видимыми и проверяемыми, чтобы приложение не выглядело рабочим при сломанном listener/hotkey/paste.
-3. Укрепить UX вокруг изображений, truncated text и preview positioning.
-4. Добавить privacy controls для clipboard manager сценариев.
-5. Продолжить вынос чистой логики в тестируемые helpers без лишних дубликатов.
+2. Определить capacity policy для pinned entries, чтобы важные записи не ломали сохранение новых копий.
+3. Сделать Win32/paste failures видимыми и проверяемыми, чтобы приложение не выглядело рабочим при сломанном listener/hotkey/paste.
+4. Укрепить UX вокруг изображений, file clipboard, truncated text и preview positioning.
+5. Добавить privacy controls для clipboard manager сценариев.
+6. Продолжить вынос чистой логики в тестируемые helpers без лишних дубликатов.
 
 ## Открытые находки
 
@@ -25,6 +26,18 @@
 - Показывать общий count отдельно от currently loaded count.
 - Проверить UX для pinned entries: pinned должны оставаться сверху без скрытия остальной истории.
 - Покрыть хотя бы чистую query/pagination часть тестами; UI flow можно оставить manual checklist.
+
+### CH-AUDIT-019 - Pinned entries могут полностью заблокировать новые unpinned записи
+
+Приоритет: P2.
+
+`_cleanup_unlocked()` ограничивает общий размер истории через удаление oldest unpinned entries. Если все 500 слотов заняты pinned entries, новая unpinned запись сначала вставляется, затем сразу удаляется cleanup-ом, а `add_entry()` все равно возвращает `True`. Temp DB probe с 500 pinned rows дал: `add_ok=True`, итоговый count остался 500, новая запись отсутствует, unpinned count 0.
+
+Что сделать:
+- Определить продуктовую политику: общий cap включает pinned или pinned имеют отдельный cap/overflow.
+- Не удалять только что добавленную запись молча; если storage full из-за pinned, возвращать explicit failure или показывать UI/status.
+- Рассмотреть отдельный `MAX_PINNED_HISTORY_SIZE` или warning при попытке pin сверх безопасного лимита.
+- Добавить regression test: 500 pinned + новая unpinned запись не должна исчезать с `add_entry() == True`.
 
 ### CH-AUDIT-005 - Image preview может уходить за экран
 
@@ -48,6 +61,8 @@
 - Вынести expected autostart command в один helper, который используется и для записи, и для проверки.
 - Сравнивать registry command с ожидаемой командой или нормализованным `SCRIPT_PATH`.
 - При stale command считать autostart disabled/needs repair и при включении перезаписывать значение.
+- Использовать `CreateKey`/safe fallback для enable path, чтобы отсутствующий `Run` key не превращался в silent failure.
+- Вернуть toggle result наверх, чтобы tray/status мог показать failure.
 - Добавить unit tests на exact command, quoted paths, stale path и missing value.
 
 ### CH-AUDIT-007 - Ошибки Win32 listener/hotkey не видны пользователю
@@ -87,6 +102,18 @@
 - Добавить deferred retry через короткий timer/backoff, пока update еще актуален.
 - Не блокировать message loop долгими retry.
 - Рассмотреть общий status channel вместе с CH-AUDIT-007.
+
+### CH-AUDIT-020 - File clipboard сохраняется как текстовые пути, но не paste-ится обратно как файлы
+
+Приоритет: P3.
+
+Когда clipboard содержит `CF_HDROP` и нет text content, monitor сохраняет список путей как newline-joined text. При выборе такой записи paste engine кладет в clipboard `CF_UNICODETEXT`, а не `CF_HDROP`, поэтому в Explorer/файловых менеджерах это не восстановит исходный file-copy operation. README при этом обещает text/images, а file-path capture не описан явно.
+
+Что сделать:
+- Решить продуктовую политику: поддерживать file entries как отдельный `content_type="files"` или не записывать `CF_HDROP`.
+- Если поддерживать files, хранить структурированный список путей и paste-ить обратно через `CF_HDROP`/DROPFILES.
+- Если оставлять как text paths, явно маркировать preview/status как "file paths" и не создавать ожидание file paste.
+- Учесть privacy: file paths могут раскрывать имена проектов, пользователей и документов.
 
 ### CH-AUDIT-018 - Search не находит хвост truncated long text
 
@@ -133,20 +160,22 @@ Storage и image helper logic уже имеют базовые `unittest` tests,
 - `ACCENT_DIM` объявлен, но не используется.
 - `self._master` сохраняется, но дальше не читается.
 
-## Рекомендуемый порядок следующих сессий
-
-1. Full history pagination/lazy loading (`CH-AUDIT-004`).
-2. Paste result flow и visible status foundation (`CH-AUDIT-012`, затем `CH-AUDIT-007`).
-3. Preview positioning helper (`CH-AUDIT-005`).
-4. Autostart stale detection (`CH-AUDIT-006`).
-5. Clipboard retry/status (`CH-AUDIT-013`).
-6. Truncated long-text policy (`CH-AUDIT-018`).
-7. Privacy controls (`CH-AUDIT-009`).
-8. Дополнительные tests и cleanup (`CH-AUDIT-008`, `CH-AUDIT-010`).
-
 ## Проверки для будущих правок
 
 - `python -m unittest discover -s tests`
 - `python -m compileall -q main.pyw app tests`
 - `python -m ruff check .`
 - `git diff --check`
+
+## Сводка для следующей сессии
+
+1. Full history pagination/lazy loading (`CH-AUDIT-004`).
+2. Capacity policy для pinned entries, чтобы 500 pinned не съедали новые записи (`CH-AUDIT-019`).
+3. Paste result flow и visible status foundation (`CH-AUDIT-012`, затем `CH-AUDIT-007`).
+4. Preview positioning helper (`CH-AUDIT-005`).
+5. Autostart stale detection и reliable toggle result (`CH-AUDIT-006`).
+6. Clipboard retry/status (`CH-AUDIT-013`).
+7. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
+8. Truncated long-text policy (`CH-AUDIT-018`).
+9. Privacy controls (`CH-AUDIT-009`).
+10. Дополнительные tests и cleanup (`CH-AUDIT-008`, `CH-AUDIT-010`).

@@ -12,11 +12,6 @@ import logging
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, APP_DIR)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
 log = logging.getLogger(__name__)
 
 # Single instance check via Named Mutex
@@ -32,7 +27,7 @@ import customtkinter
 # Fix GetForegroundWindow to return pointer-sized HWND (not truncated c_int on x64)
 ctypes.windll.user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
 
-from app.config import DB_PATH, ICON_PATH, ensure_data_dir, migrate_legacy_db
+from app.config import DB_PATH, ICON_PATH, LOG_PATH, ensure_data_dir, migrate_legacy_db
 from app.database import Database
 from app.clipboard_monitor import ClipboardMonitor
 from app.hotkey_manager import HotkeyManager
@@ -41,11 +36,13 @@ from app.popup_window import PopupWindow
 from app.paste_engine import PasteEngine
 from app.autostart import is_autostart_enabled, toggle_autostart
 from app.create_icon import create_icon
+from app.logging_setup import configure_logging
 
 
 class ClipboardHistoryApp:
     def __init__(self):
         ensure_data_dir()
+        configure_logging(LOG_PATH)
         migrate_legacy_db()
 
         if not os.path.exists(ICON_PATH):

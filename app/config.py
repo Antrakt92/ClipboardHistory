@@ -10,6 +10,7 @@ APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Store database in %APPDATA% (user-writable, survives app updates)
 _DATA_DIR = os.path.join(os.environ.get("APPDATA", APP_DIR), APP_NAME)
 DB_PATH = os.path.join(_DATA_DIR, "clipboard_history.db")
+LOG_PATH = os.path.join(_DATA_DIR, "clipboard_history.log")
 
 # Migrate old DB from project root if it exists and new location is empty
 _OLD_DB = os.path.join(APP_DIR, "clipboard_history.db")

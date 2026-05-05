@@ -51,19 +51,6 @@
 - Не блокировать message loop долгими retry.
 - Рассмотреть общий status channel вместе с CH-AUDIT-007.
 
-### CH-AUDIT-021 - Normal pythonw режим не пишет диагностические логи в файл
-
-Приоритет: P2.
-
-`main.pyw` настраивает `logging.basicConfig(...)` без file handler. В README основной запуск указан как `pythonw main.pyw`, а в таком режиме console/stderr обычно не видны пользователю. Поэтому даже уже существующие warning/error logs для autostart, tray icon, DB recovery, hotkey и будущих Win32/paste failures могут фактически пропасть. Это мешает разбору багов у пользователя и делает "логировать GetLastError" из следующих задач менее полезным без persistent sink.
-
-Что сделать:
-- Добавить app log file в `%APPDATA%/ClipboardHistory`, например `clipboard_history.log`.
-- Использовать `RotatingFileHandler` с небольшим лимитом и backup count.
-- Оставить console handler для debug-запуска через `python main.pyw`.
-- Убедиться, что logging setup не создает import-time filesystem side effects в `config`.
-- Добавить тест/проверку helper-а конфигурации логов без записи в реальный `%APPDATA%`.
-
 ### CH-AUDIT-020 - File clipboard сохраняется как текстовые пути, но не paste-ится обратно как файлы
 
 Приоритет: P3.
@@ -132,10 +119,9 @@ Storage, image helper logic, popup preview positioning и autostart command hand
 
 ## Сводка для следующей сессии
 
-1. Persistent logging foundation для `pythonw` режима (`CH-AUDIT-021`).
-2. Paste result flow и visible status foundation (`CH-AUDIT-012`, затем `CH-AUDIT-007`).
-3. Clipboard retry/status (`CH-AUDIT-013`).
-4. Clear semantics/privacy controls (`CH-AUDIT-022`, `CH-AUDIT-009`).
-5. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
-6. Truncated long-text policy (`CH-AUDIT-018`).
-7. Дополнительные tests (`CH-AUDIT-008`).
+1. Paste result flow и visible status foundation (`CH-AUDIT-012`, затем `CH-AUDIT-007`).
+2. Clipboard retry/status (`CH-AUDIT-013`).
+3. Clear semantics/privacy controls (`CH-AUDIT-022`, `CH-AUDIT-009`).
+4. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
+5. Truncated long-text policy (`CH-AUDIT-018`).
+6. Дополнительные tests (`CH-AUDIT-008`).

@@ -23,7 +23,7 @@ _single_instance_handle = _single_instance.handle
 import ctypes
 import ctypes.wintypes
 import logging
-import customtkinter
+import tkinter as tk
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +35,6 @@ from app.database import Database
 from app.clipboard_monitor import ClipboardMonitor
 from app.hotkey_manager import HotkeyManager
 from app.tray_icon import TrayIcon
-from app.popup_window import PopupWindow
 from app.paste_engine import PasteEngine
 from app.autostart import is_autostart_enabled, toggle_autostart
 from app.create_icon import create_icon
@@ -55,11 +54,9 @@ class ClipboardHistoryApp:
         if not os.path.exists(ICON_PATH):
             create_icon()
 
-        customtkinter.set_appearance_mode("Dark")
-        customtkinter.set_default_color_theme("blue")
-
-        self.root = customtkinter.CTk()
+        self.root = tk.Tk()
         self.root.withdraw()
+        self._ui_running = False
 
         self.db = None
         self.monitor = None
@@ -74,6 +71,7 @@ class ClipboardHistoryApp:
             self.monitor = ClipboardMonitor(
                 on_new_content=self._on_clipboard_change,
                 on_status=self._on_component_status,
+                should_record=lambda: not self.recording_state.is_paused(),
             )
             self.monitor.start()
             if not self.monitor.wait_ready():
@@ -85,10 +83,6 @@ class ClipboardHistoryApp:
                 )
             else:
                 self._clear_runtime_issue("clipboard_listener")
-
-            # Create popup once (hidden) — reused on every hotkey press
-            self.popup = PopupWindow(self.root, self.db, self.paste_engine, self.monitor)
-            self._refresh_status_ui()
 
             self.hotkey = HotkeyManager(on_activate=self._on_hotkey)
             self.hotkey.start()
@@ -150,6 +144,10 @@ class ClipboardHistoryApp:
         self._schedule_status_refresh()
 
     def _schedule_status_refresh(self):
+        # Worker-thread Tk calls block until mainloop starts. Startup stores the
+        # status and renders it on the main thread once the tray is ready.
+        if not self._ui_running:
+            return
         try:
             self.root.after(0, self._refresh_status_ui)
         except Exception:
@@ -182,7 +180,14 @@ class ClipboardHistoryApp:
 
     def show_popup(self, prev_hwnd=None):
         if self.popup is None:
-            return
+            # Defer the themed UI import and widgets until history is requested.
+            import customtkinter
+            from app.popup_window import PopupWindow
+
+            customtkinter.set_appearance_mode("Dark")
+            customtkinter.set_default_color_theme("blue")
+            self.popup = PopupWindow(self.root, self.db, self.paste_engine, self.monitor)
+            self._refresh_status_ui()
         if self.popup.is_visible:
             self.popup.focus()
             return
@@ -213,6 +218,7 @@ class ClipboardHistoryApp:
 
     def quit(self):
         log.info("Shutting down...")
+        self._ui_running = False
         self._stop_components()
         global _single_instance_handle
         release_single_instance(_single_instance_handle)
@@ -220,7 +226,12 @@ class ClipboardHistoryApp:
         self.root.quit()
 
     def run(self):
-        self.root.mainloop()
+        self._ui_running = True
+        try:
+            self._refresh_status_ui()
+            self.root.mainloop()
+        finally:
+            self._ui_running = False
 
 
 if __name__ == "__main__":

@@ -18,6 +18,8 @@ CLIPBOARD_BUSY_LOG_INTERVAL = 60
 CLIPBOARD_READ_OK = "ok"
 CLIPBOARD_READ_BUSY = "busy"
 CLIPBOARD_READ_ERROR = "error"
+EXCLUDE_HISTORY_FORMAT = win32clipboard.RegisterClipboardFormat("ExcludeClipboardContentFromMonitorProcessing")
+INCLUDE_HISTORY_FORMAT = win32clipboard.RegisterClipboardFormat("CanIncludeInClipboardHistory")
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
@@ -87,9 +89,10 @@ class WNDCLASS(ctypes.Structure):
 
 
 class ClipboardMonitor:
-    def __init__(self, on_new_content, on_status=None, timer_factory=None):
+    def __init__(self, on_new_content, on_status=None, timer_factory=None, should_record=None):
         self.on_new_content = on_new_content
         self.on_status = on_status
+        self._should_record = should_record or (lambda: True)
         self._running = threading.Event()
         self._running.set()
         self._ignore_lock = threading.Lock()
@@ -105,6 +108,7 @@ class ClipboardMonitor:
         self._timer_factory = timer_factory or threading.Timer
         self._retry_lock = threading.Lock()
         self._retry_timer = None
+        self._retry_generation = 0
         self._last_clipboard_warning = 0
         self._clipboard_read_issue_active = False
 
@@ -127,6 +131,7 @@ class ClipboardMonitor:
             self._thread.join(timeout)
 
     def set_ignore_next(self):
+        self._cancel_clipboard_retry()
         with self._ignore_lock:
             self._ignore_next = True
 
@@ -211,24 +216,33 @@ class ClipboardMonitor:
 
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
         if msg == WM_CLIPBOARDUPDATE:
+            self._cancel_clipboard_retry()
             with self._ignore_lock:
                 if self._ignore_next:
                     self._ignore_next = False
                     return 0
-            self._cancel_clipboard_retry()
             self._read_clipboard()
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
     def _read_clipboard(self):
-        self._cancel_clipboard_retry()
-        result = self._read_clipboard_once()
+        generation = self._cancel_clipboard_retry()
+        result = self._read_clipboard_once(expected_generation=generation)
+        with self._retry_lock:
+            if generation != self._retry_generation:
+                return
         if result == CLIPBOARD_READ_OK:
             self._clear_clipboard_read_issue()
         elif result == CLIPBOARD_READ_BUSY:
-            self._schedule_clipboard_retry(0)
+            self._schedule_clipboard_retry(0, expected_generation=generation)
 
-    def _read_clipboard_once(self):
+    def _read_clipboard_once(self, expected_generation=None):
+        with self._retry_lock:
+            generation = self._retry_generation
+        if expected_generation is not None and expected_generation != generation:
+            return CLIPBOARD_READ_OK
+        if not self._running.is_set() or not self._should_record():
+            return CLIPBOARD_READ_OK
         opened = False
         try:
             if not self._try_open_clipboard():
@@ -238,6 +252,8 @@ class ClipboardMonitor:
             raw_dib = None
             file_list = None
             try:
+                if not self._allows_history_capture():
+                    return CLIPBOARD_READ_OK
                 # Prefer text if available
                 if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
                     content = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
@@ -262,21 +278,46 @@ class ClipboardMonitor:
                     win32clipboard.CloseClipboard()
 
             # Process outside clipboard lock
+            if not self._running.is_set() or not self._should_record():
+                return CLIPBOARD_READ_OK
+            with self._retry_lock:
+                if generation != self._retry_generation:
+                    return CLIPBOARD_READ_OK
+            captured = None
             if text_content:
-                self.on_new_content(text_content, "text")
+                captured = (text_content, "text")
             elif file_list:
                 # file_list is a tuple of file paths from CF_HDROP
                 paths_text = "\n".join(file_list)
                 if paths_text.strip():
-                    self.on_new_content(paths_text, "text")
+                    captured = (paths_text, "text")
             elif raw_dib:
                 png_bytes = self._process_dib_image(raw_dib)
                 if png_bytes:
-                    self.on_new_content(png_bytes, "image")
+                    captured = (png_bytes, "image")
+            # Accept the current capture under the lock, but keep disk-backed storage
+            # outside it so a slow commit cannot block paste suppression or shutdown.
+            with self._retry_lock:
+                accepted = (
+                    captured and generation == self._retry_generation
+                    and self._running.is_set() and self._should_record()
+                )
+            if accepted:
+                self.on_new_content(*captured)
             return CLIPBOARD_READ_OK
         except Exception:
             log.exception("Error reading clipboard")
             return CLIPBOARD_READ_ERROR
+
+    @staticmethod
+    def _allows_history_capture():
+        # Honor Windows' producer-supplied history opt-out before reading any content.
+        if win32clipboard.IsClipboardFormatAvailable(EXCLUDE_HISTORY_FORMAT):
+            return False
+        if win32clipboard.IsClipboardFormatAvailable(INCLUDE_HISTORY_FORMAT):
+            flag = win32clipboard.GetClipboardData(INCLUDE_HISTORY_FORMAT)
+            return isinstance(flag, bytes) and len(flag) >= 4 and struct.unpack_from("<I", flag)[0] == 1
+        return True
 
     @staticmethod
     def _try_open_clipboard(attempts=3, delay=0.05):
@@ -289,7 +330,11 @@ class ClipboardMonitor:
                     _time.sleep(delay)
         return False
 
-    def _schedule_clipboard_retry(self, retry_index):
+    def _schedule_clipboard_retry(self, retry_index, expected_generation=None):
+        with self._retry_lock:
+            generation = self._retry_generation
+        if expected_generation is not None and expected_generation != generation:
+            return False
         if retry_index >= len(CLIPBOARD_RETRY_DELAYS):
             self._report_clipboard_read_exhausted()
             return False
@@ -298,34 +343,42 @@ class ClipboardMonitor:
 
         delay = CLIPBOARD_RETRY_DELAYS[retry_index]
         with self._retry_lock:
-            if self._retry_timer is not None:
+            if self._retry_timer is not None or generation != self._retry_generation:
                 return False
             timer = self._timer_factory(
                 delay,
-                lambda: self._run_clipboard_retry(retry_index + 1),
+                lambda: self._run_clipboard_retry(retry_index + 1, generation),
             )
             timer.daemon = True
             self._retry_timer = timer
             timer.start()
         return True
 
-    def _run_clipboard_retry(self, retry_index):
+    def _run_clipboard_retry(self, retry_index, generation):
         with self._retry_lock:
+            if generation != self._retry_generation:
+                return
             self._retry_timer = None
         if not self._running.is_set():
             return
-        result = self._read_clipboard_once()
+        result = self._read_clipboard_once(expected_generation=generation)
+        with self._retry_lock:
+            if generation != self._retry_generation:
+                return
         if result == CLIPBOARD_READ_OK:
             self._clear_clipboard_read_issue()
         elif result == CLIPBOARD_READ_BUSY:
-            self._schedule_clipboard_retry(retry_index)
+            self._schedule_clipboard_retry(retry_index, expected_generation=generation)
 
     def _cancel_clipboard_retry(self):
         with self._retry_lock:
+            self._retry_generation += 1
+            generation = self._retry_generation
             timer = self._retry_timer
             self._retry_timer = None
         if timer is not None:
             timer.cancel()
+        return generation
 
     def _report_clipboard_read_exhausted(self):
         now = _time.time()

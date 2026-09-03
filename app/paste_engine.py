@@ -16,9 +16,15 @@ user32.IsWindow.argtypes = [ctypes.wintypes.HWND]
 user32.IsWindow.restype = ctypes.wintypes.BOOL
 user32.SetForegroundWindow.argtypes = [ctypes.wintypes.HWND]
 user32.SetForegroundWindow.restype = ctypes.wintypes.BOOL
+user32.GetForegroundWindow.argtypes = []
+user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
+user32.GetClipboardSequenceNumber.argtypes = []
+user32.GetClipboardSequenceNumber.restype = ctypes.wintypes.DWORD
 user32.SendInput.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_int]
 user32.SendInput.restype = ctypes.c_uint
 kernel32.GetLastError.restype = ctypes.wintypes.DWORD
+kernel32.GlobalSize.argtypes = [ctypes.wintypes.HGLOBAL]
+kernel32.GlobalSize.restype = ctypes.c_size_t
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +35,14 @@ SCAN_CONTROL = 0x1D
 SCAN_V = 0x2F
 KEYEVENTF_KEYUP = 0x0002
 INPUT_KEYBOARD = 1
+# GlobalSize reports allocation capacity, which may include allocator padding.
+CLIPBOARD_ALLOCATION_SLACK = 64 * 1024
+
+
+@dataclass(frozen=True)
+class ClipboardWriteResult:
+    clipboard_set: bool
+    sequence: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -116,11 +130,11 @@ class PasteEngine:
             monitor.set_ignore_next()
 
         if content_type == "image" and image_data:
-            ok = self._set_clipboard_image(image_data)
+            write_result = self._set_clipboard_image(image_data)
         else:
-            ok = self._set_clipboard_text(content)
+            write_result = self._set_clipboard_text(content)
 
-        if not ok:
+        if not write_result.clipboard_set:
             log.warning("Failed to set clipboard data, aborting paste")
             # Reset ignore flag since clipboard write failed
             if monitor:
@@ -132,10 +146,19 @@ class PasteEngine:
                 reason="clipboard_write_failed",
             )
 
+        if write_result.sequence is None:
+            # The write did emit a clipboard update; keep its ignore-next state.
+            return PasteStartResult(
+                clipboard_set=True,
+                started=False,
+                content_type=content_type,
+                reason="clipboard_verification_failed",
+            )
+
         # Run focus + keypress in a thread to avoid blocking Tk main loop
         self._thread_factory(
             target=self._run_paste_worker,
-            args=(target_hwnd, on_complete),
+            args=(target_hwnd, on_complete, write_result.sequence),
             daemon=True,
         ).start()
         return PasteStartResult(
@@ -144,8 +167,8 @@ class PasteEngine:
             content_type=content_type,
         )
 
-    def _run_paste_worker(self, target_hwnd, on_complete):
-        completion = self._focus_and_press(target_hwnd)
+    def _run_paste_worker(self, target_hwnd, on_complete, sequence):
+        completion = self._focus_and_press(target_hwnd, expected_sequence=sequence)
         if on_complete:
             try:
                 on_complete(completion)
@@ -161,7 +184,7 @@ class PasteEngine:
         inp._input.ki.dwFlags = flags
         return inp
 
-    def _focus_and_press(self, target_hwnd):
+    def _focus_and_press(self, target_hwnd, expected_sequence=None):
         target_valid = bool(target_hwnd and user32.IsWindow(target_hwnd))
         focus_attempted = False
         focus_succeeded = None
@@ -178,7 +201,29 @@ class PasteEngine:
                     target_hwnd,
                     focus_error,
                 )
-        time.sleep(0.15)
+        if target_valid and focus_succeeded:
+            time.sleep(0.15)
+
+        # Windows can deny activation or the user can switch windows during the delay.
+        # Never inject a saved clipboard item into an unconfirmed foreground target.
+        clipboard_unchanged = expected_sequence is None or (
+            expected_sequence != 0 and user32.GetClipboardSequenceNumber() == expected_sequence
+        )
+        if (
+            not target_valid or not focus_succeeded or not clipboard_unchanged
+            or user32.GetForegroundWindow() != target_hwnd
+        ):
+            return PasteCompletion(
+                target_hwnd=target_hwnd,
+                target_valid=target_valid,
+                focus_attempted=focus_attempted,
+                focus_succeeded=focus_succeeded,
+                focus_error=focus_error,
+                send_input_count=0,
+                expected_input_count=EXPECTED_INPUT_COUNT,
+                send_error=None,
+                success=False,
+            )
 
         # Ctrl+V via SendInput (more reliable than deprecated keybd_event)
         inputs = (INPUT * EXPECTED_INPUT_COUNT)(
@@ -218,16 +263,18 @@ class PasteEngine:
     def _set_clipboard_text(self, content):
         try:
             if not _open_clipboard_retry():
-                return False
+                return ClipboardWriteResult(False)
             try:
                 win32clipboard.EmptyClipboard()
                 win32clipboard.SetClipboardText(content, win32clipboard.CF_UNICODETEXT)
             finally:
                 win32clipboard.CloseClipboard()
-            return True
+            return ClipboardWriteResult(True, self._capture_written_sequence(
+                win32clipboard.CF_UNICODETEXT, content
+            ))
         except Exception:
             log.exception("Failed to set clipboard text")
-            return False
+            return ClipboardWriteResult(False)
 
     def _set_clipboard_image(self, png_bytes):
         try:
@@ -238,19 +285,45 @@ class PasteEngine:
                 try:
                     with io.BytesIO() as buf:
                         img.save(buf, format="BMP")
-                        bmp_data = buf.getvalue()
+                        dib_data = buf.getvalue()[14:]
                 finally:
                     img.close()
-            dib_data = bmp_data[14:]
-
             if not _open_clipboard_retry():
-                return False
+                return ClipboardWriteResult(False)
             try:
                 win32clipboard.EmptyClipboard()
                 win32clipboard.SetClipboardData(win32clipboard.CF_DIB, dib_data)
             finally:
                 win32clipboard.CloseClipboard()
-            return True
+            return ClipboardWriteResult(True, self._capture_written_sequence(
+                win32clipboard.CF_DIB, dib_data
+            ))
         except Exception:
             log.exception("Failed to set clipboard image")
-            return False
+            return ClipboardWriteResult(False)
+
+    @staticmethod
+    def _capture_written_sequence(content_format, expected_content):
+        # Closing a write can synthesize formats and advance the sequence. Reopen
+        # read-only and confirm our payload before trusting the post-close sequence.
+        try:
+            if not _open_clipboard_retry(attempts=1):
+                return None
+            try:
+                if not win32clipboard.IsClipboardFormatAvailable(content_format):
+                    return None
+                expected_size = (
+                    len(expected_content.encode("utf-16-le", errors="surrogatepass")) + 2
+                    if content_format == win32clipboard.CF_UNICODETEXT else len(expected_content)
+                )
+                handle = win32clipboard.GetClipboardDataHandle(content_format)
+                if kernel32.GlobalSize(handle) > expected_size + CLIPBOARD_ALLOCATION_SLACK:
+                    return None
+                if win32clipboard.GetClipboardData(content_format) != expected_content:
+                    return None
+                return user32.GetClipboardSequenceNumber() or None
+            finally:
+                win32clipboard.CloseClipboard()
+        except Exception:
+            log.debug("Clipboard changed or became unavailable after writing", exc_info=True)
+            return None

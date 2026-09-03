@@ -1,6 +1,6 @@
 # ClipboardHistory Audit
 
-Дата актуализации: 2026-05-06
+Дата актуализации: 2026-09-03
 
 Назначение файла: forward-looking backlog по проекту. Здесь должны оставаться только реальные открытые баги, edge cases, риски и улучшения, которые еще нужно сделать. Закрытые задачи не переносить в этот файл; историю уже сделанного смотреть через `git log` / `git show`.
 
@@ -8,7 +8,7 @@
 
 1. Укрепить UX вокруг file clipboard и truncated text.
 2. Добавить privacy controls для clipboard manager сценариев.
-3. Продолжить вынос чистой логики в тестируемые helpers без лишних дубликатов.
+3. Продолжить Windows smoke-проверки clipboard/paste и проверить стоимость обслуживания большой image-history.
 
 ## Открытые находки
 
@@ -16,7 +16,7 @@
 
 Приоритет: P3.
 
-Когда clipboard содержит `CF_HDROP` и нет text content, monitor сохраняет список путей как newline-joined text. При выборе такой записи paste engine кладет в clipboard `CF_UNICODETEXT`, а не `CF_HDROP`, поэтому в Explorer/файловых менеджерах это не восстановит исходный file-copy operation. README при этом обещает text/images, а file-path capture не описан явно.
+Когда clipboard содержит `CF_HDROP` и нет text content, monitor сохраняет список путей как newline-joined text. При выборе такой записи paste engine кладет в clipboard `CF_UNICODETEXT`, а не `CF_HDROP`, поэтому в Explorer/файловых менеджерах это не восстановит исходный file-copy operation. README описывает ограничение; в popup отдельной маркировки file paths пока нет.
 
 Что сделать:
 - Решить продуктовую политику: поддерживать file entries как отдельный `content_type="files"` или не записывать `CF_HDROP`.
@@ -36,11 +36,11 @@ Long text хранит `original_content_len` и `truncated`, но `content` о�
 - Если нужен полный поиск, спроектировать хранение хвоста/FTS без раздувания popup queries.
 - Не обещать full-text search для truncated entries, пока хвост не хранится.
 
-### CH-AUDIT-009 - Clipboard privacy controls отсутствуют
+### CH-AUDIT-009 - Remaining app-aware privacy и настройки retention
 
 Приоритет: P3.
 
-Приложение автоматически сохраняет clipboard text/images в SQLite под `%APPDATA%`. Для clipboard manager это ожидаемо, но без denylist приложений, настройки retention и более широкой privacy policy пользователь может случайно сохранить секреты. Runtime pause recording и явная сильная очистка уже покрывают базовые сценарии, но не заменяют app-aware controls.
+Приложение сохраняет clipboard text/images в SQLite под `%APPDATA%`. Pause recording и Windows history opt-out markers предотвращают часть нежелательных записей, но приложения не обязаны предоставлять markers. Нет denylist приложений и настройки retention: сейчас unpinned expiry фиксирован на 30 днях, pinned записи не истекают. Очистка удаляет записи, но не обещает безопасное стирание свободных страниц, резервных и quarantined копий базы.
 
 Что сделать:
 - Обсудить retention settings для unpinned entries.
@@ -55,6 +55,17 @@ Storage, image helper logic, popup preview positioning, autostart command handli
 
 Что сделать:
 - Для Win32 clipboard оставить manual smoke checklist, если автоматизация окажется слишком тяжелой.
+
+### CH-AUDIT-021 - Обслуживание большой image-history может блокировать startup и UI
+
+Приоритет: P3.
+
+`Database._open_or_recreate()` выполняет полный `PRAGMA integrity_check` при каждом запуске. `VACUUM` выполняется синхронно под database lock после изменений, не чаще раза в сутки. При большом объеме image BLOB это может задерживать старт или запросы popup. Точное влияние на реальной базе не измерялось: аудит не читает пользовательскую clipboard history.
+
+Что сделать:
+- Измерить startup и обслуживание на синтетической базе с реалистичным объемом image BLOB.
+- Если задержка подтверждена, спроектировать проверку целостности и compaction вне критического пути, сохраняя надежное обнаружение повреждения и корректный shutdown.
+- Не отключать integrity check и не менять долговечность SQLite ради неподтвержденного ускорения.
 
 ## Проверки для будущих правок
 

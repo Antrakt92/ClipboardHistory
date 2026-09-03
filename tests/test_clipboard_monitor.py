@@ -1,5 +1,6 @@
 import io
 import struct
+import threading
 import unittest
 from unittest import mock
 
@@ -34,6 +35,73 @@ def make_dib_header(width, height):
 
 
 class ClipboardMonitorImageTests(unittest.TestCase):
+    def test_clipboard_history_privacy_markers_skip_content(self):
+        for name, payload in (
+            ("ExcludeClipboardContentFromMonitorProcessing", b""),
+            ("CanIncludeInClipboardHistory", struct.pack("<I", 0)),
+            ("CanIncludeInClipboardHistory", b"malformed"[:2]),
+        ):
+            with self.subTest(format=name, payload=payload):
+                marker = clipboard_monitor.win32clipboard.RegisterClipboardFormat(name)
+                text_format = clipboard_monitor.win32clipboard.CF_UNICODETEXT
+                callback = mock.Mock()
+                monitor = ClipboardMonitor(callback)
+                with (
+                    mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
+                    mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard") as close,
+                    mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt in (marker, text_format)),
+                    mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", side_effect=lambda fmt: payload if fmt == marker else "synthetic opt-out text") as get_data,
+                ):
+                    monitor._read_clipboard_once()
+                callback.assert_not_called()
+                self.assertNotIn(mock.call(text_format), get_data.call_args_list)
+                close.assert_called_once_with()
+
+    def test_explicit_history_opt_in_and_cloud_only_opt_out_allow_local_history(self):
+        for name, payload in (
+            ("CanIncludeInClipboardHistory", struct.pack("<I", 1)),
+            ("CanUploadToCloudClipboard", struct.pack("<I", 0)),
+        ):
+            with self.subTest(format=name):
+                marker = clipboard_monitor.win32clipboard.RegisterClipboardFormat(name)
+                text_format = clipboard_monitor.win32clipboard.CF_UNICODETEXT
+                callback = mock.Mock()
+                monitor = ClipboardMonitor(callback)
+                with (
+                    mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
+                    mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"),
+                    mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt in (marker, text_format)),
+                    mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", side_effect=lambda fmt: payload if fmt == marker else "synthetic history text"),
+                ):
+                    monitor._read_clipboard_once()
+                callback.assert_called_once_with("synthetic history text", "text")
+
+    def test_paused_monitor_does_not_open_or_process_clipboard(self):
+        callback = mock.Mock()
+        monitor = ClipboardMonitor(callback, should_record=lambda: False)
+        with (
+            mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard") as open_clipboard,
+            mock.patch.object(monitor, "_process_dib_image") as process_image,
+        ):
+            self.assertEqual(CLIPBOARD_READ_OK, monitor._read_clipboard_once())
+        open_clipboard.assert_not_called()
+        process_image.assert_not_called()
+        callback.assert_not_called()
+
+    def test_pause_during_read_skips_image_conversion_and_storage(self):
+        callback = mock.Mock()
+        monitor = ClipboardMonitor(callback, should_record=mock.Mock(side_effect=[True, False]))
+        with (
+            mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
+            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"),
+            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=[False, False, False, False, True]),
+            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value=make_dib(32, 24)),
+            mock.patch.object(monitor, "_process_dib_image") as process_image,
+        ):
+            self.assertEqual(CLIPBOARD_READ_OK, monitor._read_clipboard_once())
+        process_image.assert_not_called()
+        callback.assert_not_called()
+
     def test_stored_png_cap_is_12_mib(self):
         self.assertEqual(12 * 1024 * 1024, MAX_IMAGE_BYTES)
 
@@ -181,7 +249,7 @@ class RetryMonitor(ClipboardMonitor):
         self.results = list(results)
         self.read_calls = 0
 
-    def _read_clipboard_once(self):
+    def _read_clipboard_once(self, expected_generation=None):
         self.read_calls += 1
         return self.results.pop(0)
 
@@ -276,6 +344,99 @@ class ClipboardMonitorStartupTests(unittest.TestCase):
 
 
 class ClipboardMonitorRetryTests(unittest.TestCase):
+    def test_paste_during_busy_initial_read_cannot_start_a_new_retry(self):
+        timer_factory = FakeTimerFactory()
+        monitor = ClipboardMonitor(lambda *_args: None, timer_factory=timer_factory)
+
+        def become_busy(**_kwargs):
+            monitor.set_ignore_next()
+            return CLIPBOARD_READ_BUSY
+
+        with mock.patch.object(monitor, "_read_clipboard_once", side_effect=become_busy):
+            monitor._read_clipboard()
+
+        self.assertEqual([], timer_factory.timers)
+
+    def test_slow_storage_callback_does_not_block_paste_suppression(self):
+        entered = threading.Event()
+        release = threading.Event()
+        cancelled = threading.Event()
+
+        def store_slowly(_content, _kind):
+            entered.set()
+            release.wait(2)
+
+        monitor = ClipboardMonitor(store_slowly)
+
+        def begin_paste():
+            monitor.set_ignore_next()
+            cancelled.set()
+
+        reader = threading.Thread(target=monitor._read_clipboard_once)
+        paste = threading.Thread(target=begin_paste)
+        with (
+            mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
+            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"),
+            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt == clipboard_monitor.win32clipboard.CF_UNICODETEXT),
+            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value="synthetic slow-store fixture"),
+        ):
+            try:
+                reader.start()
+                self.assertTrue(entered.wait(1))
+                paste.start()
+                self.assertTrue(cancelled.wait(0.5), "Paste suppression waited for the storage callback")
+            finally:
+                release.set()
+                reader.join(2)
+                if paste.ident is not None:
+                    paste.join(2)
+
+    def test_ignored_paste_update_cancels_retry_without_reading(self):
+        timer_factory = FakeTimerFactory()
+        monitor = RetryMonitor([CLIPBOARD_READ_BUSY, CLIPBOARD_READ_OK], timer_factory=timer_factory)
+        monitor._read_clipboard()
+        timer = timer_factory.timers[0]
+
+        monitor.set_ignore_next()
+        monitor._wnd_proc(0, clipboard_monitor.WM_CLIPBOARDUPDATE, 0, 0)
+        timer.callback()
+
+        self.assertTrue(timer.cancelled)
+        self.assertEqual(1, monitor.read_calls)
+
+    def test_cancelled_timer_cannot_clear_or_replace_a_newer_retry(self):
+        timer_factory = FakeTimerFactory()
+        monitor = RetryMonitor([CLIPBOARD_READ_BUSY] * 3, timer_factory=timer_factory)
+        monitor._read_clipboard()
+        first = timer_factory.timers[0]
+        monitor._read_clipboard()
+        second = timer_factory.timers[1]
+
+        first.callback()
+
+        self.assertEqual(2, monitor.read_calls)
+        self.assertIs(second, monitor._retry_timer)
+        self.assertEqual(2, len(timer_factory.timers))
+
+    def test_paste_during_image_conversion_invalidates_pending_capture(self):
+        callback = mock.Mock()
+        monitor = ClipboardMonitor(callback)
+
+        def start_paste(_dib):
+            monitor.set_ignore_next()
+            return b"synthetic PNG"
+
+        with (
+            mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
+            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"),
+            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=[False, False, False, False, True]),
+            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value=make_dib(32, 24)),
+            mock.patch.object(monitor, "_process_dib_image", side_effect=start_paste),
+        ):
+            monitor._read_clipboard_once()
+
+        callback.assert_not_called()
+
     def test_read_clipboard_success_clears_active_clipboard_issue(self):
         statuses = []
         monitor = RetryMonitor(

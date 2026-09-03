@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from app.config import MAX_CONTENT_LENGTH, MAX_HISTORY_SIZE, MAX_IMAGE_BYTES
 from app.database import Database
@@ -58,6 +59,20 @@ def insert_text_entry(db, content, pinned=0, timestamp=None):
 
 
 class DatabaseTests(unittest.TestCase):
+    def test_operational_open_failure_does_not_quarantine_valid_database(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = os.path.join(temp_dir, "history.db")
+            create_legacy_db(db_path)
+            original = Path(db_path).read_bytes()
+            for message in ("database is locked", "disk I/O error", "unable to open database file"):
+                with self.subTest(message=message), mock.patch(
+                    "app.database.sqlite3.connect", side_effect=sqlite3.OperationalError(message)
+                ):
+                    with self.assertRaises(sqlite3.OperationalError):
+                        Database(db_path)
+                self.assertEqual(original, Path(db_path).read_bytes())
+                self.assertEqual([], list(Path(temp_dir).glob("*.corrupt-*")))
+
     def test_fresh_database_starts_and_persists_text(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = os.path.join(temp_dir, "history.db")

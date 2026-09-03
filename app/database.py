@@ -13,6 +13,10 @@ log = logging.getLogger(__name__)
 AUTO_EXPIRE_DAYS = 30
 
 
+class _CorruptDatabase(sqlite3.DatabaseError):
+    pass
+
+
 class Database:
     def __init__(self, db_path=None):
         self.db_path = db_path or DB_PATH
@@ -85,15 +89,22 @@ class Database:
             conn = sqlite3.connect(db_path, check_same_thread=False)
             result = conn.execute("PRAGMA integrity_check").fetchone()[0]
             if result != "ok":
-                raise sqlite3.DatabaseError(f"integrity check failed: {result}")
+                raise _CorruptDatabase("Database integrity check failed")
             return conn
         except sqlite3.DatabaseError as exc:
-            log.warning("Database corrupted, recreating: %s", db_path, exc_info=True)
             if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+                conn.close()
+            # A lock, permission error or unavailable disk must never rename valid history.
+            error_code = getattr(exc, "sqlite_errorcode", 0)
+            is_corrupt = isinstance(exc, _CorruptDatabase) or (error_code & 0xFF) in (11, 26)
+            if not error_code:
+                # Python 3.8-3.10 do not expose SQLite result codes on exceptions.
+                is_corrupt = is_corrupt or str(exc) in (
+                    "database disk image is malformed", "file is not a database"
+                )
+            if not is_corrupt:
+                raise
+            log.warning("Database corrupted, recreating: %s", db_path)
             cls._quarantine_db_files(db_path)
 
             fresh_conn = sqlite3.connect(db_path, check_same_thread=False)

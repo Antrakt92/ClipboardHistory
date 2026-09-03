@@ -251,12 +251,7 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._prev_hwnd = prev_hwnd
         self._visible = True
 
-        # Position near cursor
-        cx, cy = _get_cursor_pos()
-        ml, mt, mr, mb = _get_monitor_work_area(cx, cy)
-        x = max(ml + 10, min(cx - POPUP_WIDTH // 2, mr - POPUP_WIDTH - 10))
-        y = max(mt + 10, min(cy - 40, mb - POPUP_HEIGHT - 10))
-        self.geometry(f"{POPUP_WIDTH}x{POPUP_HEIGHT}+{x}+{y}")
+        self._position_popup(cursor=_get_cursor_pos())
 
         # Reset search
         self._last_search_text = ""
@@ -281,6 +276,39 @@ class PopupWindow(customtkinter.CTkToplevel):
         self.lift()
         self.attributes("-topmost", True)
         self.after(10, self._focus_window)
+
+    def _position_popup(self, *, cursor=None, position=None, work_area=None):
+        if cursor is not None:
+            cx, cy = cursor
+            work_area = _get_monitor_work_area(cx, cy)
+        left, top, right, bottom = work_area
+        scaling = self._get_window_scaling()
+        # CTk scales dimensions, but Windows cursor/work-area coordinates and
+        # geometry offsets are physical pixels. Reduce size on small displays.
+        width = min(POPUP_WIDTH, max(1, int((right - left - 20) / scaling)))
+        height = min(POPUP_HEIGHT, max(1, int((bottom - top - 20) / scaling)))
+        physical_width = round(width * scaling)
+        physical_height = round(height * scaling)
+        if position is None:
+            position = (cx - physical_width // 2, cy - 40)
+        x = _clamp_window_position(position[0], physical_width, left, right, 10)
+        y = _clamp_window_position(position[1], physical_height, top, bottom, 10)
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _set_scaling(self, new_widget_scaling, new_window_scaling):
+        position = None
+        if getattr(self, "_visible", False):
+            position = (self.winfo_x(), self.winfo_y())
+            work_area = _get_monitor_work_area(
+                position[0] + self.winfo_width() // 2,
+                position[1] + self.winfo_height() // 2,
+            )
+        super()._set_scaling(new_widget_scaling, new_window_scaling)
+        # Release CTk's temporary fixed size: show() may immediately need a
+        # different size for the target monitor, even while currently hidden.
+        self._set_scaled_min_max()
+        if position is not None:
+            self._position_popup(position=position, work_area=work_area)
 
     def close(self):
         """Hide the popup (does not destroy it)."""
@@ -1069,7 +1097,7 @@ class PopupWindow(customtkinter.CTkToplevel):
                 if preview_hwnd and foreground == preview_hwnd:
                     return
             if attempt < 1:
-                self.after(80, lambda: self._check_focus(attempt + 1))
+                self._focus_check_id = self.after(80, lambda: self._check_focus(attempt + 1))
                 return
             self.close()
         except Exception:

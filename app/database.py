@@ -4,6 +4,7 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 
 from app.config import DB_PATH, MAX_HISTORY_SIZE, MAX_CONTENT_LENGTH, MAX_IMAGE_BYTES, PREVIEW_LENGTH
 
@@ -11,6 +12,8 @@ log = logging.getLogger(__name__)
 
 # Auto-delete unpinned entries older than this (days)
 AUTO_EXPIRE_DAYS = 30
+VACUUM_MIN_FREE_BYTES = 32 * 1024 * 1024
+VACUUM_MIN_FREE_RATIO = 0.25
 
 
 class _CorruptDatabase(sqlite3.DatabaseError):
@@ -33,6 +36,17 @@ class Database:
         self._migrate()
         self._expire_old_entries()
         self._checkpoint()
+
+    @contextmanager
+    def _write_transaction_unlocked(self):
+        """Commit a write and its retention changes together while self.lock is held."""
+        previous_maintenance = (self._last_expire_time, self._needs_vacuum)
+        try:
+            with self.conn:
+                yield
+        except BaseException:
+            self._last_expire_time, self._needs_vacuum = previous_maintenance
+            raise
 
     @staticmethod
     def _text_hash(content):
@@ -230,26 +244,25 @@ class Database:
             if self._is_duplicate_text(row, record["content_hash"], record["content"]):
                 return False
 
-            self.conn.execute(
-                """INSERT INTO clipboard_history (
-                       content, content_type, timestamp, preview,
-                       content_hash, original_content_len, truncated
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    record["content"],
-                    content_type,
-                    time.time(),
-                    record["preview"],
-                    record["content_hash"],
-                    record["original_content_len"],
-                    record["truncated"],
+            with self._write_transaction_unlocked():
+                self.conn.execute(
+                    """INSERT INTO clipboard_history (
+                           content, content_type, timestamp, preview,
+                           content_hash, original_content_len, truncated
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        record["content"],
+                        content_type,
+                        time.time(),
+                        record["preview"],
+                        record["content_hash"],
+                        record["original_content_len"],
+                        record["truncated"],
+                    )
                 )
-            )
-            self.conn.commit()
-            self._cleanup_unlocked()
-            self._maybe_expire()
+                self._cleanup_unlocked()
+                self._maybe_expire()
 
-        # VACUUM outside the lock so it doesn't block get_history/UI
         self._maybe_vacuum()
         return True
 
@@ -280,15 +293,14 @@ class Database:
             size_kb = len(image_data) // 1024
             preview = f"Image ({size_kb} KB)"
 
-            self.conn.execute(
-                "INSERT INTO clipboard_history (content, content_type, timestamp, preview, image_data, image_hash) VALUES (?, ?, ?, ?, ?, ?)",
-                ("", "image", time.time(), preview, image_data, img_hash)
-            )
-            self.conn.commit()
-            self._cleanup_unlocked()
-            self._maybe_expire()
+            with self._write_transaction_unlocked():
+                self.conn.execute(
+                    "INSERT INTO clipboard_history (content, content_type, timestamp, preview, image_data, image_hash) VALUES (?, ?, ?, ?, ?, ?)",
+                    ("", "image", time.time(), preview, image_data, img_hash)
+                )
+                self._cleanup_unlocked()
+                self._maybe_expire()
 
-        # VACUUM outside the lock so it doesn't block get_history/UI
         self._maybe_vacuum()
         return True
 
@@ -310,6 +322,8 @@ class Database:
             if self._closed:
                 return []
             where_clause, params = self._history_search_filter(search_query)
+            # Columns after image_data require traversing SQLite overflow pages.
+            # The popup needs truncation only for text and never needs image_hash.
             cursor = self.conn.execute(
                 f"""SELECT id,
                           CASE
@@ -317,7 +331,8 @@ class Database:
                                   THEN COALESCE(NULLIF(original_content_len, 0), LENGTH(content))
                               ELSE LENGTH(content)
                           END as content_len,
-                          content_type, timestamp, pinned, preview, image_hash, truncated
+                          content_type, timestamp, pinned, preview,
+                          CASE WHEN content_type = 'text' THEN truncated ELSE 0 END as truncated
                    FROM clipboard_history
                    {where_clause}
                    ORDER BY pinned DESC, timestamp DESC
@@ -382,12 +397,12 @@ class Database:
         with self.lock:
             if self._closed:
                 return
-            self.conn.execute(
-                "UPDATE clipboard_history SET pinned = CASE WHEN pinned = 1 THEN 0 ELSE 1 END WHERE id = ?",
-                (entry_id,)
-            )
-            self.conn.commit()
-            self._cleanup_unlocked()
+            with self._write_transaction_unlocked():
+                self.conn.execute(
+                    "UPDATE clipboard_history SET pinned = CASE WHEN pinned = 1 THEN 0 ELSE 1 END WHERE id = ?",
+                    (entry_id,)
+                )
+                self._cleanup_unlocked()
         self._maybe_vacuum()
 
     def clear_unpinned(self):
@@ -417,6 +432,7 @@ class Database:
         return deleted
 
     def _cleanup_unlocked(self):
+        """Apply the unpinned cap inside the caller's write transaction."""
         unpinned = self.conn.execute(
             "SELECT COUNT(*) as cnt FROM clipboard_history WHERE pinned = 0"
         ).fetchone()["cnt"]
@@ -431,7 +447,6 @@ class Database:
                     LIMIT ?
                 )
             """, (to_delete,))
-            self.conn.commit()
             self._needs_vacuum = True
 
     def _maybe_expire(self):
@@ -445,27 +460,35 @@ class Database:
             "DELETE FROM clipboard_history WHERE pinned = 0 AND timestamp < ?",
             (cutoff,)
         )
-        self.conn.commit()
         if cursor.rowcount > 0:
             self._needs_vacuum = True
 
     def _maybe_vacuum(self):
-        """Run VACUUM at most once per day to reclaim space from deleted blobs.
-        Called OUTSIDE self.lock so it doesn't block get_history/UI."""
+        """Compact substantial free space at most once per day; small gaps are reused."""
         if not self._needs_vacuum:
             return
         now = time.time()
         if now - self._last_vacuum_time < 86400:
             return
-        self._last_vacuum_time = now
         with self.lock:
-            if self._closed:
+            if self._closed or now - self._last_vacuum_time < 86400:
                 return
+            self._last_vacuum_time = now
             try:
+                if not self._vacuum_worthwhile_unlocked():
+                    return
                 self.conn.execute("VACUUM")
                 self._needs_vacuum = False
             except sqlite3.DatabaseError:
                 log.debug("VACUUM skipped", exc_info=True)
+
+    def _vacuum_worthwhile_unlocked(self):
+        free_pages = self.conn.execute("PRAGMA freelist_count").fetchone()[0]
+        page_size = self.conn.execute("PRAGMA page_size").fetchone()[0]
+        if free_pages * page_size < VACUUM_MIN_FREE_BYTES:
+            return False
+        total_pages = self.conn.execute("PRAGMA page_count").fetchone()[0]
+        return total_pages > 0 and free_pages / total_pages >= VACUUM_MIN_FREE_RATIO
 
     def close(self):
         with self.lock:

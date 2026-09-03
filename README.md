@@ -52,9 +52,13 @@ Press `Ctrl+Shift+V` to open the history popup, then click any item to paste it.
 
 The popup is created on its first use, keeping Windows sign-in startup lighter. Later openings reuse the same window. Auto-paste is cancelled if the target window cannot be activated, focus changes, or another app changes the clipboard during the paste delay.
 
+Popup placement accounts for Windows display scaling and reduces its size when the monitor work area is smaller than the normal window.
+
 Use `Clear unpinned` to remove regular history while keeping pinned entries. Use `Delete all` when you want to remove pinned and unpinned entries together.
 
 Recording pause skips clipboard reads and image conversion. Entries marked with `ExcludeClipboardContentFromMonitorProcessing` or `CanIncludeInClipboardHistory=0` are also skipped; these are the [Windows clipboard-history privacy formats](https://learn.microsoft.com/en-us/windows/win32/dataxchg/clipboard-formats#cloud-clipboard-and-clipboard-history-formats). Apps must supply these markers for them to take effect. History is stored locally in `%APPDATA%\ClipboardHistory\clipboard_history.db`.
+
+When upgrading from a version that stored `clipboard_history.db` beside the application, the first migration creates a verified snapshot in the new location. The original database and any sidecar files remain as a recovery copy. Clearing the current history does not erase that old copy; remove it manually only after confirming the migrated history is complete and closing any old application instance. If migration fails, startup stops and records the error in the application log.
 
 Text entries store up to 50,000 characters, so search and paste cover that stored prefix. Copied files are recorded as text paths; selecting such an entry pastes the paths, not the files themselves.
 
@@ -63,6 +67,8 @@ Text entries store up to 50,000 characters, so search and paste cover that store
 Run `python -m unittest discover -s tests`, `python -m compileall -q main.pyw app tests`, and `python -m ruff check .` in an environment with the app dependencies installed.
 
 The [September audit report](docs/audit-2026-09-03.md) records the fixes, synthetic startup measurements, and remaining manual Windows checks. To repeat its isolated startup comparison, run `python tests/benchmark_startup.py 92a8e315c5ed23b893f7fbba12fa9a4082875651`. The benchmark mocks application services and does not read or modify the real clipboard or history database.
+
+The [follow-up audit](docs/audit-followup-2026-09-03.md) covers additional hotkey, popup, and persistence fixes. The [storage report](docs/audit-storage-2026-09-03.md) includes reproducible measurements on a temporary 240 MiB history: metadata reads avoid traversing image payloads, and small deletions no longer trigger a full database compaction. Full integrity checks remain enabled.
 
 ## How It Works
 

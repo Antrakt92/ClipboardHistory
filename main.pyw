@@ -100,7 +100,7 @@ class ClipboardHistoryApp:
             self.tray = TrayIcon(
                 on_show_popup=lambda: self._show_popup_from_tray(),
                 on_toggle_autostart=lambda: toggle_autostart(),
-                on_quit=lambda: self.root.after(0, self.quit),
+                on_quit=self._request_quit,
                 is_autostart_enabled=is_autostart_enabled,
                 on_toggle_recording_pause=self._toggle_recording_pause,
                 is_recording_paused=self.recording_state.is_paused,
@@ -146,12 +146,20 @@ class ClipboardHistoryApp:
     def _schedule_status_refresh(self):
         # Worker-thread Tk calls block until mainloop starts. Startup stores the
         # status and renders it on the main thread once the tray is ready.
+        self._schedule_ui_callback(self._refresh_status_ui)
+
+    def _schedule_ui_callback(self, callback, *args):
         if not self._ui_running:
             return
+
+        def dispatch():
+            if self._ui_running:
+                callback(*args)
+
         try:
-            self.root.after(0, self._refresh_status_ui)
-        except Exception:
-            log.debug("Failed to schedule status refresh", exc_info=True)
+            self.root.after(0, dispatch)
+        except (RuntimeError, tk.TclError):
+            log.debug("UI callback could not be scheduled", exc_info=True)
 
     def _refresh_status_ui(self):
         snapshot = self.status_store.snapshot()
@@ -168,15 +176,22 @@ class ClipboardHistoryApp:
                 log.debug("Failed to refresh tray status", exc_info=True)
 
     def _show_popup_from_tray(self):
+        if not self._ui_running:
+            return
         # Capture foreground window on the tray thread before Tk shifts focus
         hwnd = ctypes.windll.user32.GetForegroundWindow()
-        self.root.after(0, lambda: self.show_popup(hwnd))
+        self._schedule_ui_callback(self.show_popup, hwnd)
 
     def _on_hotkey(self):
+        if not self._ui_running:
+            return
         # Capture the foreground window NOW on the hotkey thread,
         # before Tk mainloop gets a chance to shift focus
         hwnd = ctypes.windll.user32.GetForegroundWindow()
-        self.root.after(0, lambda: self.show_popup(hwnd))
+        self._schedule_ui_callback(self.show_popup, hwnd)
+
+    def _request_quit(self):
+        self._schedule_ui_callback(self.quit)
 
     def show_popup(self, prev_hwnd=None):
         if self.popup is None:
@@ -226,12 +241,15 @@ class ClipboardHistoryApp:
         self.root.quit()
 
     def run(self):
-        self._ui_running = True
         try:
-            self._refresh_status_ui()
+            self.root.after(0, self._start_ui_dispatch)
             self.root.mainloop()
         finally:
             self._ui_running = False
+
+    def _start_ui_dispatch(self):
+        self._ui_running = True
+        self._refresh_status_ui()
 
 
 if __name__ == "__main__":

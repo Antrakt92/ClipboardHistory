@@ -8,7 +8,7 @@
 
 1. Укрепить UX вокруг file clipboard и truncated text.
 2. Добавить privacy controls для clipboard manager сценариев.
-3. Продолжить Windows smoke-проверки clipboard/paste и проверить стоимость обслуживания большой image-history.
+3. Продолжить Windows smoke-проверки clipboard/paste и вынести значительную compaction большой image-history из критического пути.
 
 ## Открытые находки
 
@@ -56,16 +56,18 @@ Storage, image helper logic, popup preview positioning, autostart command handli
 Что сделать:
 - Для Win32 clipboard оставить manual smoke checklist, если автоматизация окажется слишком тяжелой.
 
-### CH-AUDIT-021 - Обслуживание большой image-history может блокировать startup и UI
+### CH-AUDIT-021 - Значительная compaction большой image-history блокирует UI
 
 Приоритет: P3.
 
-`Database._open_or_recreate()` выполняет полный `PRAGMA integrity_check` при каждом запуске. `VACUUM` выполняется синхронно под database lock после изменений, не чаще раза в сутки. При большом объеме image BLOB это может задерживать старт или запросы popup. Точное влияние на реальной базе не измерялось: аудит не читает пользовательскую clipboard history.
+На синтетической базе с 240 MiB BLOB удаление половины записей вызывает `VACUUM` около 1,6 секунды и задерживает конкурентный запрос истории примерно на 1,5 секунды. Compaction выполняется синхронно под database lock, не чаще раза в сутки, когда свободно минимум 32 MiB и 25% страниц. Небольшие удаления больше не запускают полную перезапись базы. Методика и точные значения находятся в `docs/audit-storage-2026-09-03.md`; пользовательская история не читалась.
+
+Полный `PRAGMA integrity_check` при запуске сохранён. В той же синтетической проверке полный open занимал примерно 0,18 секунды; отдельного обоснования для ослабления проверки целостности нет.
 
 Что сделать:
-- Измерить startup и обслуживание на синтетической базе с реалистичным объемом image BLOB.
-- Если задержка подтверждена, спроектировать проверку целостности и compaction вне критического пути, сохраняя надежное обнаружение повреждения и корректный shutdown.
-- Не отключать integrity check и не менять долговечность SQLite ради неподтвержденного ускорения.
+- Спроектировать значительную compaction вне UI/database-read critical path, включая отдельное соединение, конкурентные записи, busy timeout и корректный shutdown.
+- Проверить массовую очистку и запись новых изображений во время compaction на синтетических данных.
+- Сохранить integrity check, долговечность SQLite и возможность повторного использования свободных страниц.
 
 ## Проверки для будущих правок
 
@@ -80,3 +82,4 @@ Storage, image helper logic, popup preview positioning, autostart command handli
 2. Truncated long-text policy (`CH-AUDIT-018`).
 3. Remaining privacy controls: retention settings, app/process denylist, broader policy (`CH-AUDIT-009`).
 4. Дополнительные GUI/manual smoke checks для реального Win32 clipboard/tray поведения (`CH-AUDIT-008`).
+5. Устранение блокировки UI при значительной compaction (`CH-AUDIT-021`).

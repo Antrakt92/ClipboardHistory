@@ -1,6 +1,10 @@
 import logging
 import os
-import shutil
+import sqlite3
+import tempfile
+import time
+from contextlib import closing
+from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
@@ -21,22 +25,54 @@ def ensure_data_dir(data_dir=_DATA_DIR):
 
 
 def migrate_legacy_db(old_db=_OLD_DB, db_path=DB_PATH):
+    """Publish a consistent snapshot; retain the legacy files as a recovery copy."""
     if not os.path.exists(old_db) or os.path.exists(db_path):
         return
+    staged_path = None
+    busy_since = None
+    started_at = time.monotonic()
+
+    def check_backup_progress(status, _remaining, _total):
+        nonlocal busy_since
+        now = time.monotonic()
+        if now - started_at >= 30:
+            raise sqlite3.OperationalError("Legacy database migration exceeded its startup time limit")
+        if status in (5, 6):  # SQLITE_BUSY / SQLITE_LOCKED, including Python 3.8.
+            if busy_since is None:
+                busy_since = now
+            elif now - busy_since >= 3:
+                raise sqlite3.OperationalError("Legacy database remained locked during migration")
+        else:
+            busy_since = None
+
     try:
-        ensure_data_dir(os.path.dirname(db_path))
-        shutil.move(old_db, db_path)
-        _log.info("Migrated database from %s to %s", old_db, db_path)
-        # Migrate WAL/SHM sidecar files to avoid data loss
-        for suffix in ("-wal", "-shm"):
-            old_sidecar = old_db + suffix
-            if os.path.exists(old_sidecar):
+        destination_dir = os.path.dirname(os.path.abspath(db_path))
+        ensure_data_dir(destination_dir)
+        fd, staged_path = tempfile.mkstemp(prefix=".clipboard-migration-", suffix=".db", dir=destination_dir)
+        os.close(fd)
+        source_uri = Path(old_db).resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(source_uri, uri=True, timeout=0.05)) as source:
+            with closing(sqlite3.connect(staged_path)) as destination:
+                source.backup(destination, pages=256, progress=check_backup_progress, sleep=0.05)
+                # Publish one self-contained database, never a partially moved WAL family.
+                destination.execute("PRAGMA journal_mode=DELETE").fetchone()
+                if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise sqlite3.DatabaseError("Legacy database snapshot failed integrity validation")
+        # Windows rename is atomic and refuses to replace a concurrently created target.
+        os.rename(staged_path, db_path)
+        _log.info("Migrated legacy database; original files retained as a recovery copy")
+    except (OSError, sqlite3.Error):
+        _log.error("Legacy database migration failed; original files were preserved", exc_info=True)
+        raise
+    finally:
+        if staged_path is not None:
+            for suffix in ("", "-wal", "-shm", "-journal"):
                 try:
-                    shutil.move(old_sidecar, db_path + suffix)
+                    os.remove(staged_path + suffix)
+                except FileNotFoundError:
+                    pass
                 except OSError:
-                    _log.warning("Failed to migrate sidecar file %s", old_sidecar, exc_info=True)
-    except OSError:
-        _log.error("Failed to migrate database from %s to %s", old_db, db_path, exc_info=True)
+                    _log.warning("Could not remove a temporary legacy migration file", exc_info=True)
 
 ICON_PATH = os.path.join(APP_DIR, "app", "assets", "icon.png")
 ICO_PATH = os.path.join(APP_DIR, "app", "assets", "icon.ico")

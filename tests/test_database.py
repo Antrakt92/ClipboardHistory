@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from app.config import MAX_CONTENT_LENGTH, MAX_HISTORY_SIZE, MAX_IMAGE_BYTES
-from app.database import Database
+from app.database import Database, VACUUM_MIN_FREE_BYTES
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +59,134 @@ def insert_text_entry(db, content, pinned=0, timestamp=None):
 
 
 class DatabaseTests(unittest.TestCase):
+    def test_compaction_requires_both_absolute_and_relative_free_space(self):
+        page_size = 4096
+        minimum_free_pages = VACUUM_MIN_FREE_BYTES // page_size
+        for free_pages, total_pages, expected in (
+            (minimum_free_pages - 1, minimum_free_pages, False),
+            (minimum_free_pages, minimum_free_pages * 4 + 1, False),
+            (minimum_free_pages, minimum_free_pages * 4, True),
+            (minimum_free_pages, minimum_free_pages, True),
+        ):
+            with self.subTest(free=free_pages, total=total_pages):
+                db = Database.__new__(Database)
+                db.conn = mock.Mock()
+                values = {
+                    "PRAGMA freelist_count": free_pages,
+                    "PRAGMA page_size": page_size,
+                    "PRAGMA page_count": total_pages,
+                }
+                db.conn.execute.side_effect = lambda sql: mock.Mock(fetchone=lambda: (values[sql],))
+                self.assertEqual(expected, db._vacuum_worthwhile_unlocked())
+
+    def test_failed_expiration_restores_maintenance_state_and_rolls_back_deletions(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with db.conn:
+                    insert_text_entry(db, "expired fixture", timestamp=time.time() - 31 * 86400)
+                db._last_expire_time = 0
+                db._needs_vacuum = False
+                expire = db._maybe_expire
+
+                def expire_then_fail():
+                    expire()
+                    raise sqlite3.OperationalError("synthetic failure after expiration")
+
+                with mock.patch.object(db, "_maybe_expire", side_effect=expire_then_fail):
+                    with self.assertRaises(sqlite3.OperationalError):
+                        db.add_entry("new fixture")
+
+                self.assertEqual(0, db._last_expire_time)
+                self.assertFalse(db._needs_vacuum)
+                self.assertEqual(["expired fixture"], [row["preview"] for row in db.get_history()])
+            finally:
+                db.close()
+
+    def test_retention_failure_rolls_back_text_and_image_insert(self):
+        for content, kind, image_data in (("atomic fixture", "text", None), ("", "image", b"synthetic PNG")):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temp_dir:
+                path = os.path.join(temp_dir, "history.db")
+                db = Database(path)
+                try:
+                    with mock.patch.object(db, "_cleanup_unlocked", side_effect=sqlite3.OperationalError("synthetic retention failure")):
+                        with self.assertRaises(sqlite3.OperationalError):
+                            db.add_entry(content, kind, image_data)
+                finally:
+                    db.close()
+                reopened = Database(path)
+                try:
+                    self.assertEqual(0, reopened.get_history_count())
+                finally:
+                    reopened.close()
+
+    def test_retention_failure_rolls_back_unpin(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with db.conn:
+                    insert_text_entry(db, "pinned fixture", pinned=1)
+                entry_id = db.get_history()[0]["id"]
+                with mock.patch.object(db, "_cleanup_unlocked", side_effect=sqlite3.OperationalError("synthetic retention failure")):
+                    with self.assertRaises(sqlite3.OperationalError):
+                        db.toggle_pin(entry_id)
+                self.assertEqual(1, db.get_entry(entry_id)["pinned"])
+            finally:
+                db.close()
+
+    def test_insert_and_retention_use_one_commit(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with db.conn:
+                    for number in range(MAX_HISTORY_SIZE):
+                        insert_text_entry(db, f"old-{number}")
+                statements = []
+                db.conn.set_trace_callback(statements.append)
+                db.add_entry("new fixture")
+                db.conn.set_trace_callback(None)
+                self.assertEqual(1, statements.count("COMMIT"))
+                self.assertEqual(MAX_HISTORY_SIZE, db.get_history_count())
+            finally:
+                db.close()
+
+    def test_history_metadata_does_not_read_image_payload_or_unused_hash(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                db.add_entry("", "image", image_data=b"synthetic image")
+                read_columns = []
+
+                def authorize(action, column_table, column, _database, _source):
+                    if action == sqlite3.SQLITE_READ and column_table == "clipboard_history":
+                        read_columns.append(column)
+                    return sqlite3.SQLITE_OK
+
+                db.conn.set_authorizer(authorize)
+                history = db.get_history()
+                db.conn.set_authorizer(None)
+                self.assertEqual("image", history[0]["content_type"])
+                self.assertEqual(0, history[0]["truncated"])
+                self.assertNotIn("image_data", read_columns)
+                self.assertNotIn("image_hash", read_columns)
+            finally:
+                db.close()
+
+    def test_tiny_deletion_does_not_rewrite_database_for_compaction(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                db.add_entry("", "image", image_data=b"x" * 1024 * 1024)
+                db._last_vacuum_time = 0
+                statements = []
+                db.conn.set_trace_callback(statements.append)
+                db.delete_entry(db.get_history()[0]["id"])
+                db.conn.set_trace_callback(None)
+                self.assertNotIn("VACUUM", statements)
+                self.assertGreater(db.conn.execute("PRAGMA freelist_count").fetchone()[0], 0)
+            finally:
+                db.close()
+
     def test_operational_open_failure_does_not_quarantine_valid_database(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = os.path.join(temp_dir, "history.db")
@@ -193,12 +321,14 @@ class DatabaseTests(unittest.TestCase):
         db._last_vacuum_time = time.time() - 90000
         db.conn = FakeConn(fail=True)
 
-        Database._maybe_vacuum(db)
+        with mock.patch.object(db, "_vacuum_worthwhile_unlocked", return_value=True):
+            Database._maybe_vacuum(db)
         self.assertTrue(db._needs_vacuum)
 
         db.conn = FakeConn(fail=False)
         db._last_vacuum_time = time.time() - 90000
-        Database._maybe_vacuum(db)
+        with mock.patch.object(db, "_vacuum_worthwhile_unlocked", return_value=True):
+            Database._maybe_vacuum(db)
         self.assertFalse(db._needs_vacuum)
 
     def test_hourly_expiration_sets_vacuum_flag_when_rows_are_deleted(self):

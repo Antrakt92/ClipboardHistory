@@ -26,6 +26,14 @@ user32.GetMessageW.argtypes = [
     ctypes.c_uint,
 ]
 user32.GetMessageW.restype = ctypes.wintypes.BOOL
+user32.PeekMessageW.argtypes = [
+    ctypes.POINTER(ctypes.wintypes.MSG),
+    ctypes.wintypes.HWND,
+    ctypes.c_uint,
+    ctypes.c_uint,
+    ctypes.c_uint,
+]
+user32.PeekMessageW.restype = ctypes.wintypes.BOOL
 user32.PostThreadMessageW.argtypes = [
     ctypes.wintypes.DWORD,
     ctypes.c_uint,
@@ -56,11 +64,14 @@ class HotkeyManager:
         self._thread = None
         self._thread_id = None
         self._ready = threading.Event()
+        self._stop_requested = threading.Event()
         self.registered = False
         self.error_code = None
         self.error_message = None
 
     def start(self):
+        if self._thread is not None:
+            return
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -69,31 +80,61 @@ class HotkeyManager:
         return self.registered
 
     def stop(self, timeout=2):
+        self._stop_requested.set()
         if self._thread_id:
             user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
-        if self._thread and self._thread.is_alive():
+        if (
+            self._thread and self._thread is not threading.current_thread()
+            and self._thread.is_alive()
+        ):
             self._thread.join(timeout)
 
     def _run(self):
-        self._thread_id = kernel32.GetCurrentThreadId()
+        try:
+            if self._stop_requested.is_set():
+                return
+            msg = ctypes.wintypes.MSG()
+            # PostThreadMessage fails before the target thread has a message queue.
+            # Create it before exposing the thread ID to stop().
+            user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)
+            self._thread_id = kernel32.GetCurrentThreadId()
+            if self._stop_requested.is_set():
+                return
 
-        # Register Ctrl+Shift+V globally (VK code = layout-independent)
-        result = user32.RegisterHotKey(None, HOTKEY_ID, MOD_CTRL | MOD_SHIFT | MOD_NOREPEAT, VK_V)
-        self.registered = bool(result)
-        if result:
+            # Register Ctrl+Shift+V globally (VK code = layout-independent).
+            self.registered = bool(user32.RegisterHotKey(
+                None, HOTKEY_ID, MOD_CTRL | MOD_SHIFT | MOD_NOREPEAT, VK_V
+            ))
+            if not self.registered:
+                self.error_code = kernel32.GetLastError()
+                self.error_message = "Ctrl+Shift+V hotkey could not be registered"
+                log.warning("%s, error=%s", self.error_message, self.error_code)
+                return
             self.error_code = None
             self.error_message = None
-        else:
-            self.error_code = kernel32.GetLastError()
-            self.error_message = "Ctrl+Shift+V hotkey could not be registered"
-            log.warning("%s, error=%s", self.error_message, self.error_code)
-        self._ready.set()
-        if not result:
-            return
+            self._ready.set()
 
-        msg = ctypes.wintypes.MSG()
-        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
-            if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID:
-                self.on_activate()
-
-        user32.UnregisterHotKey(None, HOTKEY_ID)
+            while not self._stop_requested.is_set():
+                result = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if result <= 0:
+                    if result < 0:
+                        self.error_code = kernel32.GetLastError()
+                        self.error_message = "Hotkey message loop failed"
+                        log.error("%s, error=%s", self.error_message, self.error_code)
+                    break
+                if (
+                    not self._stop_requested.is_set()
+                    and msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID
+                ):
+                    try:
+                        self.on_activate()
+                    except Exception:
+                        log.exception("Hotkey activation callback failed")
+        finally:
+            try:
+                if self.registered:
+                    user32.UnregisterHotKey(None, HOTKEY_ID)
+            finally:
+                self.registered = False
+                self._thread_id = None
+                self._ready.set()

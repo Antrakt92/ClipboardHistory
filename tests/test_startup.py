@@ -16,6 +16,85 @@ class ApplicationStartupTests(unittest.TestCase):
         cls.app_class = namespace["ClipboardHistoryApp"]
         cls.namespace = cls.app_class.__init__.__globals__
 
+    def test_hotkey_and_tray_requests_before_mainloop_do_not_call_tk(self):
+        app = self.app_class.__new__(self.app_class)
+        app.root = mock.Mock()
+        app._ui_running = False
+
+        app._on_hotkey()
+        app._show_popup_from_tray()
+
+        app.root.after.assert_not_called()
+
+    def test_queued_hotkey_is_ignored_after_shutdown_begins(self):
+        app = self.app_class.__new__(self.app_class)
+        app.root = mock.Mock()
+        app._ui_running = True
+        app.show_popup = mock.Mock()
+
+        with mock.patch.object(self.namespace["ctypes"].windll.user32, "GetForegroundWindow", return_value=123):
+            app._on_hotkey()
+        callback = app.root.after.call_args.args[1]
+        app._ui_running = False
+        callback()
+
+        app.show_popup.assert_not_called()
+
+    def test_tk_shutdown_error_does_not_escape_hotkey_or_tray_callback(self):
+        app = self.app_class.__new__(self.app_class)
+        app.root = mock.Mock()
+        app.root.after.side_effect = RuntimeError("synthetic mainloop shutdown")
+        app._ui_running = True
+
+        with mock.patch.object(self.namespace["ctypes"].windll.user32, "GetForegroundWindow", return_value=123):
+            app._on_hotkey()
+            app._show_popup_from_tray()
+
+    def test_active_hotkey_preserves_original_foreground_target(self):
+        app = self.app_class.__new__(self.app_class)
+        app.root = mock.Mock()
+        app._ui_running = True
+        app.show_popup = mock.Mock()
+
+        with mock.patch.object(self.namespace["ctypes"].windll.user32, "GetForegroundWindow", return_value=123):
+            app._on_hotkey()
+        app.root.after.call_args.args[1]()
+
+        app.show_popup.assert_called_once_with(123)
+
+    def test_tray_quit_is_gated_by_mainloop_lifetime(self):
+        app = self.app_class.__new__(self.app_class)
+        app.root = mock.Mock()
+        app.quit = mock.Mock()
+        app._ui_running = False
+
+        app._request_quit()
+        app.root.after.assert_not_called()
+        app._ui_running = True
+        app._request_quit()
+        app.root.after.call_args.args[1]()
+
+        app.quit.assert_called_once_with()
+
+    def test_worker_dispatch_starts_only_once_mainloop_processes_events(self):
+        app = self.app_class.__new__(self.app_class)
+        app.root = mock.Mock()
+        app._ui_running = False
+        app._refresh_status_ui = mock.Mock()
+        states = []
+
+        def mainloop():
+            states.append(app._ui_running)
+            app.root.after.call_args.args[1]()
+            states.append(app._ui_running)
+
+        app.root.mainloop.side_effect = mainloop
+        app.run()
+
+        self.assertEqual([False, True], states)
+        self.assertFalse(app._ui_running)
+        app._refresh_status_ui.assert_called_once_with()
+
     def test_status_callback_before_mainloop_does_not_call_tk(self):
         app = self.app_class.__new__(self.app_class)
         app.root = mock.Mock()

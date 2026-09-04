@@ -1,12 +1,12 @@
 # ClipboardHistory Audit
 
-Дата актуализации: 2026-09-03
+Дата актуализации: 2026-09-05
 
 Назначение файла: forward-looking backlog по проекту. Здесь должны оставаться только реальные открытые баги, edge cases, риски и улучшения, которые еще нужно сделать. Закрытые задачи не переносить в этот файл; историю уже сделанного смотреть через `git log` / `git show`.
 
 ## Текущий фокус
 
-1. Укрепить UX вокруг file clipboard и truncated text.
+1. Укрепить UX вокруг file clipboard и уведомлений об отмене paste.
 2. Добавить privacy controls для clipboard manager сценариев.
 3. Продолжить Windows smoke-проверки clipboard/paste и вынести значительную compaction большой image-history из критического пути.
 
@@ -23,18 +23,6 @@
 - Если поддерживать files, хранить структурированный список путей и paste-ить обратно через `CF_HDROP`/DROPFILES.
 - Если оставлять как text paths, явно маркировать preview/status как "file paths" и не создавать ожидание file paste.
 - Учесть privacy: file paths могут раскрывать имена проектов, пользователей и документов.
-
-### CH-AUDIT-018 - Search не находит хвост truncated long text
-
-Приоритет: P3.
-
-Long text хранит `original_content_len` и `truncated`, но `content` остается обрезанным до `MAX_CONTENT_LENGTH`. `get_history(search_query=...)` ищет только по сохраненному `content`/image preview, поэтому фрагмент за пределом storage cap не находится.
-
-Что сделать:
-- Сделать UI-подсказку для truncated entries явнее: например "stored first 50,000 chars".
-- Решить продуктовую политику: полный storage/search для long text или честное ограничение текущего cap.
-- Если нужен полный поиск, спроектировать хранение хвоста/FTS без раздувания popup queries.
-- Не обещать full-text search для truncated entries, пока хвост не хранится.
 
 ### CH-AUDIT-009 - Remaining app-aware privacy и настройки retention
 
@@ -69,6 +57,28 @@ Storage, image helper logic, popup preview positioning, autostart command handli
 - Проверить массовую очистку и запись новых изображений во время compaction на синтетических данных.
 - Сохранить integrity check, долговечность SQLite и возможность повторного использования свободных страниц.
 
+### CH-AUDIT-022 - Поиск по большой текстовой истории выполняется в UI потоке
+
+Приоритет: P2.
+
+Поиск по большой истории все еще выполняется синхронно в Tk callback. На временной синтетической базе из 500 записей по ~47 500 кириллических символов единый Unicode-запрос page + total занимает около 266 мс; прежний ASCII-only поиск с двумя запросами — около 166 мс на тех же данных. Это крайний текстовый объем; пользовательская база не читалась. Методика и сравнение в `docs/audit-2026-09-05.md`.
+
+Что сделать:
+- Вынести поиск из Tk callback с generation/cancellation, чтобы устаревший результат не заменял новый.
+- Сохранить единый snapshot page + total и metadata-only выдачу; проверить одновременную запись, удаление, закрытие и повторное открытие popup.
+- Не заменять Unicode matching на ASCII-only поиск ради скорости.
+
+### CH-AUDIT-023 - Неудачный или отмененный paste виден только в логе
+
+Приоритет: P2.
+
+Popup скрывается до попытки записи clipboard. Ошибка записи, отказ активации окна, смена clipboard/focus и удержание modifier keys отменяют автоматическую вставку безопасно, но пользователь не получает объяснение: `_on_item_click` и `_handle_paste_completion` только логируют отказ.
+
+Что сделать:
+- Добавить краткое не перехватывающее фокус уведомление с различием «не скопировано» и «скопировано, автоматическая вставка отменена».
+- Не показывать содержимое clipboard в уведомлении и не открывать popup поверх нового активного окна.
+- Согласовать причину отмены в результате paste worker с сообщением и тестами.
+
 ## Проверки для будущих правок
 
 - `python -m unittest discover -s tests`
@@ -79,7 +89,8 @@ Storage, image helper logic, popup preview positioning, autostart command handli
 ## Сводка для следующей сессии
 
 1. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
-2. Truncated long-text policy (`CH-AUDIT-018`).
+2. Уведомления об отмененном paste (`CH-AUDIT-023`).
 3. Remaining privacy controls: retention settings, app/process denylist, broader policy (`CH-AUDIT-009`).
 4. Дополнительные GUI/manual smoke checks для реального Win32 clipboard/tray поведения (`CH-AUDIT-008`).
 5. Устранение блокировки UI при значительной compaction (`CH-AUDIT-021`).
+6. Асинхронный поиск большой текстовой истории (`CH-AUDIT-022`).

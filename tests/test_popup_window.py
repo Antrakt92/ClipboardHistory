@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 from app.paste_engine import PasteCompletion, PasteStartResult
 from app.runtime_status import RuntimeIssue
@@ -16,6 +18,7 @@ from app.popup_window import (
     _calculate_preview_position,
     _clamp_history_limit,
     _format_history_count,
+    _format_text_metadata,
     _should_show_load_more,
 )
 
@@ -111,6 +114,13 @@ class PopupPreviewPositionTests(unittest.TestCase):
 
 
 class PopupHistoryFooterTests(unittest.TestCase):
+    def test_truncated_text_label_states_exact_saved_prefix(self):
+        self.assertEqual("First 50,000 of 60,123 chars", _format_text_metadata({
+            "content_len": 60123, "truncated": True,
+        }))
+        self.assertEqual("50,000 chars", _format_text_metadata({"content_len": 50000}))
+        self.assertEqual("", _format_text_metadata({"content_len": 20}))
+
     def test_history_count_label_formats_loaded_and_total(self):
         self.assertEqual("0 items", _format_history_count(0, 0))
         self.assertEqual("1 item", _format_history_count(1, 1))
@@ -204,6 +214,9 @@ class FakePopup:
     def close(self):
         self.closed = True
         self._visible = False
+
+    def _ensure_current_search(self):
+        return True
 
     def after(self, delay, callback):
         if self.after_should_fail:
@@ -464,6 +477,83 @@ class PopupPasteActionTests(unittest.TestCase):
 
         self.assertEqual([], popup.db.touched)
         self.assertIn("Failed to schedule paste completion", "\n".join(logs.output))
+
+
+class PopupSearchSafetyTests(unittest.TestCase):
+    def test_empty_search_results_are_distinct_from_empty_history_and_use_one_page_query(self):
+        for query, message in (
+            ("missing", "No matches\nTry a different search"),
+            (None, "Nothing here yet\nCopy something to get started"),
+        ):
+            with self.subTest(query=query):
+                popup = mock.Mock()
+                popup._visible = True
+                popup._current_search_query = query
+                popup._loaded_limit = 60
+                popup._thumb_cache = {}
+                popup._items_inner.winfo_children.return_value = []
+                popup.db.get_history_page.return_value = ([], 0)
+                with mock.patch("app.popup_window.tk.Label") as label:
+                    PopupWindow._load_items(popup)
+                self.assertEqual(message, label.call_args.kwargs["text"])
+                popup.db.get_history_page.assert_called_once_with(limit=60, search_query=query)
+                popup.db.get_history_count.assert_not_called()
+                popup.db.get_history.assert_not_called()
+                self.assertEqual(HISTORY_PAGE_SIZE, popup._loaded_limit)
+
+    def make_popup(self, query="", loaded_query=None):
+        popup = object.__new__(PopupWindow)
+        popup._visible = True
+        popup._current_search_query = loaded_query
+        popup._search_after_id = "pending-search"
+        popup.search_entry = mock.Mock()
+        popup.search_entry.get.return_value = query
+        popup._selected_index = 0
+        popup._item_data = [{"id": 1}]
+        popup.after_cancel = mock.Mock()
+        popup._on_item_click = mock.Mock()
+        popup._delete_item = mock.Mock()
+        popup._toggle_pin = mock.Mock()
+
+        def load(*args, **kwargs):
+            popup._selected_index = -1
+            popup._current_search_query = args[0]
+
+        popup._load_items = mock.Mock(side_effect=load)
+        return popup
+
+    def test_delete_in_search_field_never_deletes_history(self):
+        popup = self.make_popup()
+        widget = mock.Mock()
+        widget.winfo_class.return_value = "Entry"
+        popup._delete_selected(SimpleNamespace(widget=widget))
+        popup._delete_item.assert_not_called()
+
+    def test_keyboard_actions_do_not_use_selection_from_previous_search(self):
+        for action, effect in (
+            ("_paste_selected", "_on_item_click"),
+            ("_delete_selected", "_delete_item"),
+            ("_pin_selected", "_toggle_pin"),
+        ):
+            with self.subTest(action=action):
+                popup = self.make_popup(query="new search")
+                getattr(popup, action)()
+                getattr(popup, effect).assert_not_called()
+                popup._load_items.assert_called_once_with("new search", reset=True)
+                popup.after_cancel.assert_called_once_with("pending-search")
+                self.assertIsNone(popup._search_after_id)
+
+    def test_mouse_paste_does_not_use_row_from_previous_search(self):
+        popup = self.make_popup(query="new search")
+        popup.db = mock.Mock()
+        PopupWindow._on_item_click(popup, 1)
+        popup.db.get_entry.assert_not_called()
+
+    def test_current_search_selection_can_still_be_pasted(self):
+        popup = self.make_popup(query="current", loaded_query="current")
+        popup._paste_selected()
+        popup._on_item_click.assert_called_once_with(1)
+        popup._load_items.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -14,6 +14,13 @@ log = logging.getLogger(__name__)
 AUTO_EXPIRE_DAYS = 30
 VACUUM_MIN_FREE_BYTES = 32 * 1024 * 1024
 VACUUM_MIN_FREE_RATIO = 0.25
+# Columns after image_data traverse overflow pages; only text needs its trailing metadata.
+HISTORY_METADATA_COLUMNS = """history.id,
+    CASE WHEN history.content_type = 'text'
+        THEN COALESCE(NULLIF(history.original_content_len, 0), LENGTH(history.content))
+        ELSE LENGTH(history.content) END AS content_len,
+    history.content_type, history.timestamp, history.pinned, history.preview,
+    CASE WHEN history.content_type = 'text' THEN history.truncated ELSE 0 END AS truncated"""
 
 
 class _CorruptDatabase(sqlite3.DatabaseError):
@@ -30,6 +37,9 @@ class Database:
         self._needs_vacuum = False
         self.conn = self._open_or_recreate(self.db_path)
         self.conn.row_factory = sqlite3.Row
+        # SQLite LIKE only folds ASCII; preserve literal Unicode search without
+        # storing a second copy of private text or loading image payloads.
+        self.conn.create_function("unicode_contains", 2, self._unicode_contains)
         self.conn.execute("PRAGMA journal_mode=WAL").fetchone()
         self.conn.execute("PRAGMA busy_timeout=3000")
         self._create_tables()
@@ -305,16 +315,19 @@ class Database:
         return True
 
     @staticmethod
+    def _unicode_contains(content, folded_query):
+        return folded_query in (content or "").casefold()
+
+    @staticmethod
     def _history_search_filter(search_query):
         if not search_query:
             return "", ()
 
-        escaped = search_query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        pattern = f"%{escaped}%"
+        folded_query = search_query.casefold()
         return (
-            "WHERE content LIKE ? ESCAPE '\\' "
-            "OR (content_type = 'image' AND preview LIKE ? ESCAPE '\\')",
-            (pattern, pattern),
+            "WHERE unicode_contains(content, ?) "
+            "OR (content_type = 'image' AND unicode_contains(preview, ?))",
+            (folded_query, folded_query),
         )
 
     def get_history(self, limit=50, offset=0, search_query=None):
@@ -322,24 +335,48 @@ class Database:
             if self._closed:
                 return []
             where_clause, params = self._history_search_filter(search_query)
-            # Columns after image_data require traversing SQLite overflow pages.
-            # The popup needs truncation only for text and never needs image_hash.
             cursor = self.conn.execute(
-                f"""SELECT id,
-                          CASE
-                              WHEN content_type = 'text'
-                                  THEN COALESCE(NULLIF(original_content_len, 0), LENGTH(content))
-                              ELSE LENGTH(content)
-                          END as content_len,
-                          content_type, timestamp, pinned, preview,
-                          CASE WHEN content_type = 'text' THEN truncated ELSE 0 END as truncated
-                   FROM clipboard_history
+                f"""SELECT {HISTORY_METADATA_COLUMNS}
+                   FROM clipboard_history AS history
                    {where_clause}
-                   ORDER BY pinned DESC, timestamp DESC
+                   ORDER BY pinned DESC, timestamp DESC, id DESC
                    LIMIT ? OFFSET ?""",
                 (*params, limit, offset)
             )
             return [dict(row) for row in cursor.fetchall()]
+
+    def get_history_page(self, limit=50, offset=0, search_query=None):
+        """Return (metadata rows, matching total) from one consistent SQLite snapshot."""
+        with self.lock:
+            if self._closed:
+                return [], 0
+            where_clause, params = self._history_search_filter(search_query)
+            # The windowed CTE evaluates Unicode matching once, retaining IDs and
+            # ordering fields only. The left join preserves total for an empty page.
+            rows = self.conn.execute(
+                f"""WITH matches AS (
+                        SELECT id, pinned, timestamp, COUNT(*) OVER () AS total
+                        FROM clipboard_history {where_clause}
+                    ), page AS (
+                        SELECT id FROM matches
+                        ORDER BY pinned DESC, timestamp DESC, id DESC
+                        LIMIT ? OFFSET ?
+                    )
+                    SELECT {HISTORY_METADATA_COLUMNS}, COALESCE(totals.total, 0) AS total
+                    FROM (SELECT MAX(total) AS total FROM matches) AS totals
+                    LEFT JOIN page ON 1
+                    LEFT JOIN clipboard_history AS history ON history.id = page.id
+                    ORDER BY history.pinned DESC, history.timestamp DESC, history.id DESC""",
+                (*params, limit, offset),
+            ).fetchall()
+            total = rows[0]["total"]
+            entries = []
+            for row in rows:
+                if row["id"] is not None:
+                    entry = dict(row)
+                    del entry["total"]
+                    entries.append(entry)
+            return entries, total
 
     def get_history_count(self, search_query=None):
         with self.lock:

@@ -59,6 +59,108 @@ def insert_text_entry(db, content, pinned=0, timestamp=None):
 
 
 class DatabaseTests(unittest.TestCase):
+    def test_history_page_returns_consistent_total_and_pinned_pagination(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with db.conn:
+                    insert_text_entry(db, "Привет older", timestamp=100)
+                    insert_text_entry(db, "Привет newest", timestamp=300)
+                    insert_text_entry(db, "Привет pinned", pinned=1, timestamp=50)
+                    insert_text_entry(db, "unrelated", timestamp=400)
+                entries, total = db.get_history_page(limit=1, offset=1, search_query="ПРИВЕТ")
+                self.assertEqual(3, total)
+                self.assertEqual(["Привет newest"], [row["preview"] for row in entries])
+                self.assertEqual(set(db.get_history(limit=1)[0]), set(entries[0]))
+                self.assertEqual(([], 3), db.get_history_page(limit=1, offset=50, search_query="ПРИВЕТ"))
+                self.assertEqual(([], 3), db.get_history_page(limit=0, search_query="ПРИВЕТ"))
+                self.assertEqual(([], 0), db.get_history_page(search_query="missing"))
+            finally:
+                db.close()
+            self.assertEqual(([], 0), db.get_history_page())
+
+    def test_history_page_filters_each_text_once_even_without_matches(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                for n in range(5):
+                    db.add_entry(f"synthetic text {n}")
+                contains = mock.Mock(side_effect=db._unicode_contains)
+                db.conn.create_function("unicode_contains", 2, contains)
+                for query, total in (("SYNTHETIC", 5), ("missing", 0)):
+                    with self.subTest(query=query):
+                        contains.reset_mock()
+                        self.assertEqual(total, db.get_history_page(limit=1, search_query=query)[1])
+                        self.assertEqual(5, contains.call_count)
+            finally:
+                db.close()
+
+    def test_history_page_does_not_select_image_payload_or_hash(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                db.add_entry("", "image", image_data=b"synthetic image")
+                columns = []
+
+                def authorize(action, table, column, _database, _source):
+                    if action == sqlite3.SQLITE_READ and table == "clipboard_history":
+                        columns.append(column)
+                    return sqlite3.SQLITE_OK
+
+                db.conn.set_authorizer(authorize)
+                entries, total = db.get_history_page(search_query="IMAGE")
+                db.conn.set_authorizer(None)
+                self.assertEqual(1, total)
+                self.assertEqual("image", entries[0]["content_type"])
+                self.assertNotIn("image_data", columns)
+                self.assertNotIn("image_hash", columns)
+            finally:
+                db.close()
+
+    def test_history_page_uses_one_snapshot_during_concurrent_connection_insert(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "history.db")
+            db = Database(path)
+            writer = sqlite3.connect(path)
+            try:
+                db.add_entry("matching original")
+                inserted = False
+
+                def contains(content, query):
+                    nonlocal inserted
+                    if not inserted:
+                        inserted = True
+                        with writer:
+                            writer.execute(
+                                "INSERT INTO clipboard_history (content, content_type, timestamp, preview) VALUES (?, 'text', ?, ?)",
+                                ("matching concurrent", time.time(), "matching concurrent"),
+                            )
+                    return db._unicode_contains(content, query)
+
+                db.conn.create_function("unicode_contains", 2, contains)
+                entries, total = db.get_history_page(search_query="matching")
+                self.assertTrue(inserted)
+                self.assertEqual(1, total)
+                self.assertEqual(["matching original"], [row["preview"] for row in entries])
+                self.assertEqual(2, db.get_history_page(search_query="matching")[1])
+            finally:
+                writer.close()
+                db.close()
+
+    def test_search_matches_unicode_case_variants_and_remains_literal(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                db.add_entry("Привет МИР, Straße, CAFÉ; 100%_done")
+                db.add_entry("unrelated fixture")
+                for query in ("ПРИВЕТ", "мир", "STRASSE", "café", "100%_done"):
+                    with self.subTest(query=query):
+                        self.assertEqual(1, db.get_history_count(query))
+                        self.assertEqual(1, len(db.get_history(search_query=query)))
+                self.assertEqual(0, db.get_history_count("100%_missing"))
+            finally:
+                db.close()
+
     def test_compaction_requires_both_absolute_and_relative_free_space(self):
         page_size = 4096
         minimum_free_pages = VACUUM_MIN_FREE_BYTES // page_size

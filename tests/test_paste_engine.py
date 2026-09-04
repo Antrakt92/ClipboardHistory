@@ -92,6 +92,9 @@ class FakeUser32:
     def GetForegroundWindow(self):
         return self.foreground
 
+    def GetAsyncKeyState(self, key):
+        return 0
+
     def SendInput(self, expected, inputs, input_size):
         self.send_calls += 1
         return self.send_count
@@ -106,6 +109,55 @@ class FakeKernel32:
 
 
 class PasteEngineTests(unittest.TestCase):
+    def test_held_modifier_does_not_send_another_shortcut(self):
+        for key in (0x10, 0x11, 0x12, 0x5B, 0x5C):
+            with self.subTest(key=key):
+                fake_user32 = FakeUser32(send_count=4)
+                fake_user32.GetAsyncKeyState = lambda vk: 0x8000 if vk == key else 0
+                with (
+                    mock.patch.object(paste_engine, "user32", fake_user32),
+                    mock.patch.object(paste_engine.time, "sleep"),
+                    mock.patch.object(paste_engine.time, "monotonic", side_effect=[0, 1]),
+                ):
+                    completion = PasteEngine()._focus_and_press(100)
+                self.assertFalse(completion.success)
+                self.assertEqual(0, fake_user32.send_calls)
+
+    def test_modifier_release_allows_paste_without_releasing_user_keys(self):
+        fake_user32 = FakeUser32(send_count=4)
+        fake_user32.GetAsyncKeyState = mock.Mock(return_value=0x8000)
+
+        def release_keys(delay):
+            if delay != 0.15:
+                fake_user32.GetAsyncKeyState.return_value = 0
+
+        with (
+            mock.patch.object(paste_engine, "user32", fake_user32),
+            mock.patch.object(paste_engine.time, "sleep", side_effect=release_keys) as sleep,
+        ):
+            completion = PasteEngine()._focus_and_press(100)
+        self.assertTrue(completion.success)
+        self.assertEqual(1, fake_user32.send_calls)
+        self.assertGreater(len(sleep.call_args_list), 1)
+
+    def test_clipboard_change_while_waiting_for_modifiers_cancels_paste(self):
+        fake_user32 = FakeUser32(send_count=4)
+        fake_user32.GetAsyncKeyState = mock.Mock(return_value=0x8000)
+        fake_user32.GetClipboardSequenceNumber = mock.Mock(return_value=77)
+
+        def release_and_copy(delay):
+            if delay != 0.15:
+                fake_user32.GetAsyncKeyState.return_value = 0
+                fake_user32.GetClipboardSequenceNumber.return_value = 78
+
+        with (
+            mock.patch.object(paste_engine, "user32", fake_user32),
+            mock.patch.object(paste_engine.time, "sleep", side_effect=release_and_copy),
+        ):
+            completion = PasteEngine()._focus_and_press(100, expected_sequence=77)
+        self.assertFalse(completion.success)
+        self.assertEqual(0, fake_user32.send_calls)
+
     def test_image_write_verifies_original_dib_after_close(self):
         image = Image.new("RGB", (4, 4), (32, 64, 96))
         with io.BytesIO() as buffer:

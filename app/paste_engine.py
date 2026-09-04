@@ -20,6 +20,8 @@ user32.GetForegroundWindow.argtypes = []
 user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
 user32.GetClipboardSequenceNumber.argtypes = []
 user32.GetClipboardSequenceNumber.restype = ctypes.wintypes.DWORD
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+user32.GetAsyncKeyState.restype = ctypes.wintypes.SHORT
 user32.SendInput.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_int]
 user32.SendInput.restype = ctypes.c_uint
 kernel32.GetLastError.restype = ctypes.wintypes.DWORD
@@ -30,6 +32,9 @@ log = logging.getLogger(__name__)
 
 EXPECTED_INPUT_COUNT = 4
 VK_CONTROL = 0x11
+MODIFIER_KEYS = (0x10, VK_CONTROL, 0x12, 0x5B, 0x5C)  # Shift, Ctrl, Alt, left/right Win
+MODIFIER_RELEASE_TIMEOUT = 0.8
+MODIFIER_POLL_INTERVAL = 0.02
 VK_V = 0x56
 SCAN_CONTROL = 0x1D
 SCAN_V = 0x2F
@@ -189,6 +194,7 @@ class PasteEngine:
         focus_attempted = False
         focus_succeeded = None
         focus_error = None
+        modifiers_released = False
 
         if target_valid:
             focus_attempted = True
@@ -203,6 +209,7 @@ class PasteEngine:
                 )
         if target_valid and focus_succeeded:
             time.sleep(0.15)
+            modifiers_released = self._wait_for_modifier_release()
 
         # Windows can deny activation or the user can switch windows during the delay.
         # Never inject a saved clipboard item into an unconfirmed foreground target.
@@ -210,7 +217,7 @@ class PasteEngine:
             expected_sequence != 0 and user32.GetClipboardSequenceNumber() == expected_sequence
         )
         if (
-            not target_valid or not focus_succeeded or not clipboard_unchanged
+            not target_valid or not focus_succeeded or not modifiers_released or not clipboard_unchanged
             or user32.GetForegroundWindow() != target_hwnd
         ):
             return PasteCompletion(
@@ -259,6 +266,17 @@ class PasteEngine:
             send_error=send_error,
             success=success,
         )
+
+    @staticmethod
+    def _wait_for_modifier_release():
+        # SendInput preserves existing key state. Wait for physical release so
+        # Ctrl+Shift+V does not become a different shortcut or release held Ctrl.
+        deadline = time.monotonic() + MODIFIER_RELEASE_TIMEOUT
+        while any(user32.GetAsyncKeyState(key) & 0x8000 for key in MODIFIER_KEYS):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(MODIFIER_POLL_INTERVAL)
+        return True
 
     def _set_clipboard_text(self, content):
         try:

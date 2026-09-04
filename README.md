@@ -10,7 +10,7 @@ Lightweight clipboard history manager for Windows. Lives in the system tray, rec
 - **Global hotkey** — `Ctrl+Shift+V` opens the popup from anywhere (works on any keyboard layout)
 - **Text & images** — captures both text and image clipboard content (screenshots, copied images)
 - **Image preview** — hover over an image entry to see a larger preview
-- **Search** — filter history by typing in the search bar
+- **Search** — filter history with case-insensitive Unicode matching, including Cyrillic; `%`, `_`, and backslashes are literal characters
 - **Pin** — pin important entries so they stay at the top
 - **Pause recording** — temporarily stop saving new clipboard entries from the tray menu
 - **Clipboard privacy markers** — respects applications' Windows clipboard-history opt-out flags before reading their content
@@ -50,7 +50,9 @@ The app appears in the system tray. Copy text or images as usual — they are sa
 
 Press `Ctrl+Shift+V` to open the history popup, then click any item to paste it.
 
-The popup is created on its first use, keeping Windows sign-in startup lighter. Later openings reuse the same window. Auto-paste is cancelled if the target window cannot be activated, focus changes, or another app changes the clipboard during the paste delay.
+The popup is created on its first use, keeping Windows sign-in startup lighter. Later openings reuse the same window. Auto-paste is cancelled if the target window cannot be activated, focus changes, or another app changes the clipboard during the paste delay. If Ctrl, Shift, Alt, or a Windows key is still held, auto-paste waits up to 0.8 seconds for release and cancels if it stays held. This prevents held hotkey keys from turning the paste into another shortcut.
+
+While editing a search, `Delete` edits the query; use the row's `Del` action to delete an entry. If you act before a new search finishes, the popup refreshes the results and cancels the old selection's action. Select the desired result after the refresh.
 
 Popup placement accounts for Windows display scaling and reduces its size when the monitor work area is smaller than the normal window.
 
@@ -60,11 +62,13 @@ Recording pause skips clipboard reads and image conversion. Entries marked with 
 
 When upgrading from a version that stored `clipboard_history.db` beside the application, the first migration creates a verified snapshot in the new location. The original database and any sidecar files remain as a recovery copy. Clearing the current history does not erase that old copy; remove it manually only after confirming the migrated history is complete and closing any old application instance. If migration fails, startup stops and records the error in the application log.
 
-Text entries store up to 50,000 characters, so search and paste cover that stored prefix. Copied files are recorded as text paths; selecting such an entry pastes the paths, not the files themselves.
+Text entries store up to 50,000 characters, so search and paste cover that stored prefix. Longer entries explicitly show `First 50,000 of … chars` in their row. Copied files are recorded as text paths; selecting such an entry pastes the paths, not the files themselves.
 
 ## Validation and performance
 
 Run `python -m unittest discover -s tests`, `python -m compileall -q main.pyw app tests`, and `python -m ruff check .` in an environment with the app dependencies installed.
+
+The [September 5 audit](docs/audit-2026-09-05.md) covers search and keyboard safety, modifier-aware pasting, a consistent page/count query, measured search costs, and remaining Windows smoke checks.
 
 The [September audit report](docs/audit-2026-09-03.md) records the fixes, synthetic startup measurements, and remaining manual Windows checks. To repeat its isolated startup comparison, run `python tests/benchmark_startup.py 92a8e315c5ed23b893f7fbba12fa9a4082875651`. The benchmark mocks application services and does not read or modify the real clipboard or history database.
 

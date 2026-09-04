@@ -12,6 +12,7 @@ from app.config import (
     IMAGE_PREVIEW_DELAY,
     IMAGE_PREVIEW_SIZE,
     IMAGE_THUMB_SIZE,
+    MAX_CONTENT_LENGTH,
     POPUP_HEIGHT,
     POPUP_WIDTH,
 )
@@ -173,6 +174,15 @@ def _should_show_load_more(loaded, total):
     return total > 0 and loaded < total
 
 
+def _format_text_metadata(entry):
+    content_len = entry.get("content_len", 0) or 0
+    if entry.get("truncated"):
+        return f"First {MAX_CONTENT_LENGTH:,} of {content_len:,} chars"
+    if content_len >= LARGE_TEXT_THRESHOLD:
+        return f"{content_len:,} chars"
+    return ""
+
+
 def _set_bg_recursive(widget, bg):
     """Set background color on widget and all descendants."""
     try:
@@ -236,7 +246,7 @@ class PopupWindow(customtkinter.CTkToplevel):
         self.bind("<Up>", lambda e: self._navigate(-1))
         self.bind("<Down>", lambda e: self._navigate(1))
         self.bind("<Return>", lambda e: self._paste_selected())
-        self.bind("<Delete>", lambda e: self._delete_selected())
+        self.bind("<Delete>", self._delete_selected)
         self.bind("<Control-p>", lambda e: self._pin_selected())
 
         # Start hidden — show() will make it visible
@@ -519,17 +529,17 @@ class PopupWindow(customtkinter.CTkToplevel):
         old_cache = self._thumb_cache
         self._thumb_cache = {}
 
-        self._total_items = self.db.get_history_count(self._current_search_query)
-        self._loaded_limit = _clamp_history_limit(self._loaded_limit, self._total_items)
-        entries = self.db.get_history(
-            limit=self._loaded_limit,
+        entries, self._total_items = self.db.get_history_page(
+            limit=max(HISTORY_PAGE_SIZE, self._loaded_limit),
             search_query=self._current_search_query,
         )
+        self._loaded_limit = _clamp_history_limit(self._loaded_limit, self._total_items)
 
         if not entries:
             empty = tk.Label(
                 self._items_inner,
-                text="Nothing here yet\nCopy something to get started",
+                text=("No matches\nTry a different search" if self._current_search_query
+                      else "Nothing here yet\nCopy something to get started"),
                 font=("Segoe UI", 12), fg=TEXT_DIM, bg=BG, justify="center"
             )
             empty.pack(pady=50)
@@ -626,7 +636,6 @@ class PopupWindow(customtkinter.CTkToplevel):
             clickable.append(bot)
         else:
             preview_text = entry["preview"] or ""
-            content_len = entry.get("content_len", 0) or 0
 
             if len(preview_text) > PREVIEW_MAX_CHARS:
                 preview_text = preview_text[:PREVIEW_MAX_CHARS] + "..."
@@ -656,15 +665,13 @@ class PopupWindow(customtkinter.CTkToplevel):
         time_lbl.pack(side="left")
         clickable.append(time_lbl)
 
-        if not is_image and (content_len >= LARGE_TEXT_THRESHOLD or entry.get("truncated")):
-            meta_parts = []
-            if content_len >= LARGE_TEXT_THRESHOLD:
-                meta_parts.append(f"{content_len:,} chars")
-            if entry.get("truncated"):
-                meta_parts.append("truncated")
+        metadata = _format_text_metadata(entry) if not is_image else ""
+        if metadata:
             chars_lbl = tk.Label(
-                bot, text="  \u00b7  " + " \u00b7 ".join(meta_parts),
-                font=_FONT_SMALL, fg=TEXT_DIM, bg=normal_bg
+                bot, text="  \u00b7  " + metadata,
+                font=_FONT_SMALL,
+                fg=TEXT_SECONDARY if entry.get("truncated") else TEXT_DIM,
+                bg=normal_bg
             )
             chars_lbl.pack(side="left")
             clickable.append(chars_lbl)
@@ -850,6 +857,9 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._search_after_id = self.after(150, self._do_search)
 
     def _do_search(self):
+        if self._search_after_id is not None:
+            self.after_cancel(self._search_after_id)
+            self._search_after_id = None
         if not self._visible:
             return
         try:
@@ -857,6 +867,16 @@ class PopupWindow(customtkinter.CTkToplevel):
         except Exception:
             return
         self._load_items(query, reset=True)
+
+    def _ensure_current_search(self):
+        """Refresh stale rows and cancel the action that targeted their old selection."""
+        if not self._visible:
+            return False
+        query = self.search_entry.get().strip() or None
+        if query != self._current_search_query:
+            self._do_search()
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Navigation
@@ -868,6 +888,7 @@ class PopupWindow(customtkinter.CTkToplevel):
         return SURFACE
 
     def _navigate(self, direction):
+        self._ensure_current_search()
         if not self._item_frames:
             return
 
@@ -914,22 +935,32 @@ class PopupWindow(customtkinter.CTkToplevel):
     # ------------------------------------------------------------------
 
     def _paste_selected(self):
+        if not self._ensure_current_search():
+            return
         if 0 <= self._selected_index < len(self._item_data):
             entry_id = self._item_data[self._selected_index]["id"]
             self._on_item_click(entry_id)
 
-    def _delete_selected(self):
+    def _delete_selected(self, event=None):
+        # Entry class bindings run before the toplevel binding: Delete should
+        # edit the query without also deleting a selected history row.
+        if event is not None and event.widget.winfo_class() in ("Entry", "TEntry", "Text"):
+            return
+        if not self._ensure_current_search():
+            return
         if 0 <= self._selected_index < len(self._item_data):
             entry_id = self._item_data[self._selected_index]["id"]
             self._delete_item(entry_id)
 
     def _pin_selected(self):
+        if not self._ensure_current_search():
+            return
         if 0 <= self._selected_index < len(self._item_data):
             entry_id = self._item_data[self._selected_index]["id"]
             self._toggle_pin(entry_id)
 
     def _on_item_click(self, entry_id):
-        if not self._visible:
+        if not self._ensure_current_search():
             return
         entry = self.db.get_entry(entry_id)
         if not entry:
@@ -978,10 +1009,14 @@ class PopupWindow(customtkinter.CTkToplevel):
             )
 
     def _toggle_pin(self, entry_id):
+        if not self._ensure_current_search():
+            return
         self.db.toggle_pin(entry_id)
         self._load_items(reset=False)
 
     def _delete_item(self, entry_id):
+        if not self._ensure_current_search():
+            return
         self.db.delete_entry(entry_id)
         self._load_items(reset=False)
 

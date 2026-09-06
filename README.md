@@ -48,6 +48,16 @@ python main.pyw
 
 The app appears in the system tray. Copy text or images as usual — they are saved automatically. Use `Pause recording` in the tray menu when you temporarily do not want new clipboard entries stored.
 
+Windows autostart uses a small `ClipboardHistory.exe` launcher with the app's name
+and clipboard icon, so the entry no longer inherits Python's branding. Enabling
+autostart builds it locally from `app/assets/ClipboardHistoryLauncher.cs` using
+Windows' existing .NET Framework compiler; no packages are downloaded. The launcher
+and build metadata live under `%LOCALAPPDATA%\ClipboardHistory\Launcher` and start
+the same Python environment and `main.pyw` without a console. Build failure leaves
+the previous startup entry untouched. Legacy Python entries remain recognized;
+switching autostart on writes the branded entry. An already running process keeps
+its loaded code until its next restart.
+
 Press `Ctrl+Shift+V` to open the history popup, then click any item to paste it.
 
 The popup is created on its first use, keeping Windows sign-in startup lighter. Later openings reuse the same window. Auto-paste is cancelled if the target window cannot be activated, focus changes, or another app changes the clipboard during the paste delay. If Ctrl, Shift, Alt, or a Windows key is still held, auto-paste waits up to 0.8 seconds for release and cancels if it stays held. This prevents held hotkey keys from turning the paste into another shortcut.

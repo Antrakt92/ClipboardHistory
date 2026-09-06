@@ -7,6 +7,7 @@ import sys
 import winreg
 
 from app.config import AUTOSTART_KEY, AUTOSTART_NAME, SCRIPT_PATH
+from app.startup_launcher import ensure_launcher, launcher_path
 
 log = logging.getLogger(__name__)
 
@@ -27,10 +28,13 @@ def _get_pythonw_path():
     return sys.executable
 
 
-def _build_autostart_command(python_path=None, script_path=None):
+def _build_autostart_command(python_path=None, script_path=None, launcher=None):
     python_path = python_path or _get_pythonw_path()
     script_path = script_path or SCRIPT_PATH
-    return subprocess.list2cmdline([python_path, script_path])
+    parts = [python_path, script_path]
+    if launcher is not None:
+        parts.insert(0, str(launcher))
+    return subprocess.list2cmdline(parts)
 
 
 def _split_command_line(command):
@@ -59,7 +63,11 @@ def _same_path(left, right):
 
 def _is_expected_autostart_command(command, python_path=None, script_path=None):
     parts = _split_command_line(command)
-    if parts is None or len(parts) != 2:
+    if parts is None:
+        return False
+    if len(parts) == 3 and _same_path(parts[0], str(launcher_path())):
+        parts = parts[1:]
+    if len(parts) != 2:
         return False
     expected_python = python_path or _get_pythonw_path()
     script_path = script_path or SCRIPT_PATH
@@ -79,11 +87,11 @@ def is_autostart_enabled():
 
 def enable_autostart():
     try:
-        cmd = _build_autostart_command()
+        cmd = _build_autostart_command(launcher=ensure_launcher())
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, AUTOSTART_KEY) as key:
             winreg.SetValueEx(key, AUTOSTART_NAME, 0, winreg.REG_SZ, cmd)
         return True
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         log.warning("Failed to enable autostart", exc_info=True)
         return False
 

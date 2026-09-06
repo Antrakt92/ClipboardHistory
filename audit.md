@@ -43,6 +43,10 @@ Storage, image helper logic, popup preview positioning, autostart command handli
 
 Что сделать:
 - Для Win32 clipboard оставить manual smoke checklist, если автоматизация окажется слишком тяжелой.
+- Для branded autostart проверить имя/значок в заново открытом списке Windows
+  Startup apps и вход в Windows. Native-тест проверяет FileDescription, извлечение
+  иконки, запуск с Unicode/спецсимволами и отсутствие запуска в режиме проверки;
+  он не заменяет настоящий logon.
 
 ### CH-AUDIT-021 - Значительная compaction большой image-history блокирует UI
 

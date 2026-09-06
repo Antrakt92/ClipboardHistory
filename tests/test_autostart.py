@@ -119,6 +119,7 @@ class AutostartTests(unittest.TestCase):
         written = {}
         expected_python = r"C:\Python\pythonw.exe"
         expected_script = r"C:\App\main.pyw"
+        expected_launcher = r"C:\Apps\ClipboardHistory.exe"
 
         def set_value(_key, name, reserved, value_type, value):
             written.update(name=name, reserved=reserved, value_type=value_type, value=value)
@@ -128,6 +129,7 @@ class AutostartTests(unittest.TestCase):
             mock.patch.object(autostart.winreg, "SetValueEx", side_effect=set_value),
             mock.patch.object(autostart, "_get_pythonw_path", return_value=expected_python),
             mock.patch.object(autostart, "SCRIPT_PATH", expected_script),
+            mock.patch.object(autostart, "ensure_launcher", return_value=expected_launcher),
         ):
             self.assertTrue(autostart.enable_autostart())
 
@@ -135,9 +137,24 @@ class AutostartTests(unittest.TestCase):
         self.assertEqual(AUTOSTART_NAME, written["name"])
         self.assertEqual(autostart.winreg.REG_SZ, written["value_type"])
         self.assertEqual(
-            autostart._build_autostart_command(expected_python, expected_script),
+            autostart._build_autostart_command(expected_python, expected_script, expected_launcher),
             written["value"],
         )
+
+    def test_branded_command_is_recognized_without_accepting_other_launchers(self):
+        launcher = str(autostart.launcher_path())
+        command = autostart._build_autostart_command(launcher=launcher)
+        self.assertTrue(autostart._is_expected_autostart_command(command))
+        self.assertFalse(autostart._is_expected_autostart_command(command + " --extra"))
+        self.assertFalse(autostart._is_expected_autostart_command(
+            autostart._build_autostart_command(launcher=r"C:\Other\ClipboardHistory.exe")))
+
+    def test_failed_launcher_build_preserves_existing_registry_value(self):
+        with mock.patch.object(autostart, "ensure_launcher", side_effect=OSError("compiler unavailable")), \
+                mock.patch.object(autostart.winreg, "CreateKey") as registry, \
+                self.assertLogs("app.autostart", level="WARNING"):
+            self.assertFalse(autostart.enable_autostart())
+        registry.assert_not_called()
 
     def test_disable_autostart_treats_missing_key_or_value_as_success(self):
         key = FakeKey()

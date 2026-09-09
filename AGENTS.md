@@ -27,8 +27,9 @@ Win32 lifecycle behavior, and safe persistence matter more than UI polish.
   immediately re-record itself as a new copy.
 - Win32 and GUI behavior may need manual smoke checks even when pure logic tests
   pass.
-- File clipboard (`CF_HDROP`) policy is currently an open audit item. Do not
-  imply full file-paste support until the product behavior is implemented.
+- Verify file clipboard (`CF_HDROP`) support against current code, hard tests,
+  and `audit.md` before claiming it; a historical backlog label is not current
+  product evidence.
 
 ## Verification
 
@@ -54,10 +55,16 @@ covered by automated tests.
   duplicated behavior; avoid aesthetic refactors in GUI shell code.
 - Add regression tests for storage, privacy, truncation, paste flow, and helper
   logic when practical.
-- Update `audit.md` when confirmed backlog items are closed or new real risks
-  are found.
+- During authorized implementation, update `audit.md` for in-scope confirmed
+  closures or findings. Read-only reviews report findings without editing it.
 
 ## Git
 
 - Stage only files changed for the current task.
 - Do not add AI co-author trailers.
+
+## Scoped Verification
+
+Instruction-only edits need path/command checks and diff review. Do not launch
+clipboard capture, modify autostart, or purge the user's history to verify prose.
+Runtime smoke tests use synthetic content and preserve the real database.

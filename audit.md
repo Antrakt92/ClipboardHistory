@@ -1,100 +1,103 @@
 # ClipboardHistory Audit
 
-Дата актуализации: 2026-09-05
+Last updated: 2026-09-05
 
-Назначение файла: forward-looking backlog по проекту. Здесь должны оставаться только реальные открытые баги, edge cases, риски и улучшения, которые еще нужно сделать. Закрытые задачи не переносить в этот файл; историю уже сделанного смотреть через `git log` / `git show`.
+Purpose: a forward-looking project backlog. Keep only confirmed open bugs, edge cases, risks, and improvements that still need work. Do not add closed tasks to this file; use `git log` / `git show` for completed work.
 
-## Текущий фокус
+## Current focus
 
-1. Укрепить UX вокруг file clipboard и уведомлений об отмене paste.
-2. Добавить privacy controls для clipboard manager сценариев.
-3. Продолжить Windows smoke-проверки clipboard/paste и вынести значительную compaction большой image-history из критического пути.
+1. Improve the UX around copied files and paste cancellation notifications.
+2. Add privacy controls for clipboard manager use cases.
+3. Continue Windows clipboard/paste smoke checks and move substantial compaction of large image histories out of the critical path.
 
-## Открытые находки
+## Open findings
 
-### CH-AUDIT-020 - File clipboard сохраняется как текстовые пути, но не paste-ится обратно как файлы
+### CH-AUDIT-020 - Copied files are stored as text paths and cannot be pasted back as files
 
-Приоритет: P3.
+Priority: P3.
 
-Когда clipboard содержит `CF_HDROP` и нет text content, monitor сохраняет список путей как newline-joined text. При выборе такой записи paste engine кладет в clipboard `CF_UNICODETEXT`, а не `CF_HDROP`, поэтому в Explorer/файловых менеджерах это не восстановит исходный file-copy operation. README описывает ограничение; в popup отдельной маркировки file paths пока нет.
+When the clipboard contains `CF_HDROP` without text content, the monitor stores the paths as newline-joined text. Selecting that entry makes the paste engine write `CF_UNICODETEXT`, rather than `CF_HDROP`, so it does not restore the original file-copy operation in Explorer or other file managers. The README describes this limitation; the popup does not yet label file paths separately.
 
-Что сделать:
-- Решить продуктовую политику: поддерживать file entries как отдельный `content_type="files"` или не записывать `CF_HDROP`.
-- Если поддерживать files, хранить структурированный список путей и paste-ить обратно через `CF_HDROP`/DROPFILES.
-- Если оставлять как text paths, явно маркировать preview/status как "file paths" и не создавать ожидание file paste.
-- Учесть privacy: file paths могут раскрывать имена проектов, пользователей и документов.
+Next steps:
 
-### CH-AUDIT-009 - Remaining app-aware privacy и настройки retention
+- Decide the product policy: support file entries with a separate `content_type="files"`, or stop recording `CF_HDROP`.
+- If files are supported, store a structured path list and paste it through `CF_HDROP`/DROPFILES.
+- If text paths remain the policy, clearly label the preview/status as "file paths" so users do not expect a file paste.
+- Account for privacy: file paths can expose project, user, and document names.
 
-Приоритет: P3.
+### CH-AUDIT-009 - Remaining app-aware privacy and retention settings
 
-Приложение сохраняет clipboard text/images в SQLite под `%APPDATA%`. Pause recording и Windows history opt-out markers предотвращают часть нежелательных записей, но приложения не обязаны предоставлять markers. Нет denylist приложений и настройки retention: сейчас unpinned expiry фиксирован на 30 днях, pinned записи не истекают. Очистка удаляет записи, но не обещает безопасное стирание свободных страниц, резервных и quarantined копий базы.
+Priority: P3.
 
-Что сделать:
-- Обсудить retention settings для unpinned entries.
-- Рассмотреть app/process denylist.
-- Проверить, как privacy controls взаимодействуют с ignore-next при paste.
+The app saves clipboard text/images in SQLite under `%APPDATA%`. Pause recording and Windows history opt-out markers prevent some unwanted captures, but applications are not required to provide markers. There is no application denylist or retention setting: unpinned expiry is currently fixed at 30 days, and pinned entries do not expire. Clearing removes entries but does not promise secure erasure of free pages, backup copies, or quarantined database copies.
 
-### CH-AUDIT-008 - Тестовый каркас еще не покрывает GUI/Win32 edge cases
+Next steps:
 
-Приоритет: P3.
+- Discuss retention settings for unpinned entries.
+- Consider an app/process denylist.
+- Check how privacy controls interact with ignore-next during paste.
 
-Storage, image helper logic, popup preview positioning, autostart command handling, paste result flow, runtime status, clipboard retry, Python compatibility и single-instance startup уже имеют базовые `unittest` tests. Остаются более широкие GUI/manual smoke checks для реального Win32 clipboard/tray поведения.
+### CH-AUDIT-008 - Test coverage still lacks GUI/Win32 edge cases
 
-Что сделать:
-- Для Win32 clipboard оставить manual smoke checklist, если автоматизация окажется слишком тяжелой.
-- Для branded autostart проверить имя/значок в заново открытом списке Windows
-  Startup apps и вход в Windows. Native-тест проверяет FileDescription, извлечение
-  иконки, запуск с Unicode/спецсимволами и отсутствие запуска в режиме проверки;
-  он не заменяет настоящий logon.
+Priority: P3.
 
-### CH-AUDIT-021 - Значительная compaction большой image-history блокирует UI
+Storage, image helper logic, popup preview positioning, autostart command handling, paste result flow, runtime status, clipboard retry, Python compatibility, and single-instance startup already have basic `unittest` coverage. Broader GUI/manual smoke checks for real Win32 clipboard/tray behavior remain.
 
-Приоритет: P3.
+Next steps:
 
-На синтетической базе с 240 MiB BLOB удаление половины записей вызывает `VACUUM` около 1,6 секунды и задерживает конкурентный запрос истории примерно на 1,5 секунды. Compaction выполняется синхронно под database lock, не чаще раза в сутки, когда свободно минимум 32 MiB и 25% страниц. Небольшие удаления больше не запускают полную перезапись базы. Методика и точные значения находятся в `docs/audit-storage-2026-09-03.md`; пользовательская история не читалась.
+- Keep a manual smoke checklist for the Win32 clipboard if automation proves too costly.
+- For branded autostart, check the name/icon in a freshly opened Windows Startup apps list and verify Windows sign-in. The native test checks FileDescription, icon extraction, launching with Unicode/special characters, and no launch in verification mode; it does not replace a real logon.
 
-Полный `PRAGMA integrity_check` при запуске сохранён. В той же синтетической проверке полный open занимал примерно 0,18 секунды; отдельного обоснования для ослабления проверки целостности нет.
+### CH-AUDIT-021 - Substantial compaction of a large image history blocks the UI
 
-Что сделать:
-- Спроектировать значительную compaction вне UI/database-read critical path, включая отдельное соединение, конкурентные записи, busy timeout и корректный shutdown.
-- Проверить массовую очистку и запись новых изображений во время compaction на синтетических данных.
-- Сохранить integrity check, долговечность SQLite и возможность повторного использования свободных страниц.
+Priority: P3.
 
-### CH-AUDIT-022 - Поиск по большой текстовой истории выполняется в UI потоке
+On a synthetic database with 240 MiB of BLOB data, deleting half the entries triggers a `VACUUM` lasting about 1.6 seconds and delays a concurrent history query by about 1.5 seconds. Compaction runs synchronously under the database lock, at most once a day, when at least 32 MiB and 25% of pages are free. Small deletions no longer trigger a full database rewrite. The methodology and exact measurements are in `docs/audit-storage-2026-09-03.md`; the user's history was not read.
 
-Приоритет: P2.
+The full startup `PRAGMA integrity_check` remains enabled. In the same synthetic check, a full open took about 0.18 seconds; there is no separate justification for weakening integrity verification.
 
-Поиск по большой истории все еще выполняется синхронно в Tk callback. На временной синтетической базе из 500 записей по ~47 500 кириллических символов единый Unicode-запрос page + total занимает около 266 мс; прежний ASCII-only поиск с двумя запросами — около 166 мс на тех же данных. Это крайний текстовый объем; пользовательская база не читалась. Методика и сравнение в `docs/audit-2026-09-05.md`.
+Next steps:
 
-Что сделать:
-- Вынести поиск из Tk callback с generation/cancellation, чтобы устаревший результат не заменял новый.
-- Сохранить единый snapshot page + total и metadata-only выдачу; проверить одновременную запись, удаление, закрытие и повторное открытие popup.
-- Не заменять Unicode matching на ASCII-only поиск ради скорости.
+- Design substantial compaction outside the UI/database-read critical path, including a separate connection, concurrent writes, busy timeout, and correct shutdown.
+- Test bulk clearing and new image writes during compaction using synthetic data.
+- Preserve integrity checking, SQLite durability, and reuse of free pages.
 
-### CH-AUDIT-023 - Неудачный или отмененный paste виден только в логе
+### CH-AUDIT-022 - Searching a large text history runs on the UI thread
 
-Приоритет: P2.
+Priority: P2.
 
-Popup скрывается до попытки записи clipboard. Ошибка записи, отказ активации окна, смена clipboard/focus и удержание modifier keys отменяют автоматическую вставку безопасно, но пользователь не получает объяснение: `_on_item_click` и `_handle_paste_completion` только логируют отказ.
+Search over a large history still runs synchronously in a Tk callback. On a temporary synthetic database of 500 entries with about 47,500 Cyrillic characters each, the combined Unicode page + total query takes about 266 ms; the previous ASCII-only search with two queries takes about 166 ms on the same data. This is an extreme text volume; the user's database was not read. The methodology and comparison are in `docs/audit-2026-09-05.md`.
 
-Что сделать:
-- Добавить краткое не перехватывающее фокус уведомление с различием «не скопировано» и «скопировано, автоматическая вставка отменена».
-- Не показывать содержимое clipboard в уведомлении и не открывать popup поверх нового активного окна.
-- Согласовать причину отмены в результате paste worker с сообщением и тестами.
+Next steps:
 
-## Проверки для будущих правок
+- Move search out of the Tk callback with generation/cancellation handling so stale results cannot replace newer ones.
+- Preserve a single page + total snapshot and metadata-only results; test concurrent writes, deletion, popup closing, and reopening.
+- Do not replace Unicode matching with ASCII-only search for speed.
+
+### CH-AUDIT-023 - Failed or cancelled paste is visible only in the log
+
+Priority: P2.
+
+The popup hides before attempting to write to the clipboard. A write failure, window activation refusal, clipboard/focus change, or held modifier keys safely cancels automatic paste, but the user receives no explanation: `_on_item_click` and `_handle_paste_completion` only log the failure.
+
+Next steps:
+
+- Add a brief notification that does not steal focus and distinguishes "not copied" from "copied, automatic paste cancelled".
+- Do not show clipboard content in the notification or reopen the popup over the newly active window.
+- Keep the cancellation reason in the paste worker's result consistent with the message and tests.
+
+## Checks for future changes
 
 - `python -m unittest discover -s tests`
 - `python -m compileall -q main.pyw app tests`
 - `python -m ruff check .`
 - `git diff --check`
 
-## Сводка для следующей сессии
+## Next-session summary
 
-1. File clipboard policy: полноценный files support или честный text-path режим (`CH-AUDIT-020`).
-2. Уведомления об отмененном paste (`CH-AUDIT-023`).
-3. Remaining privacy controls: retention settings, app/process denylist, broader policy (`CH-AUDIT-009`).
-4. Дополнительные GUI/manual smoke checks для реального Win32 clipboard/tray поведения (`CH-AUDIT-008`).
-5. Устранение блокировки UI при значительной compaction (`CH-AUDIT-021`).
-6. Асинхронный поиск большой текстовой истории (`CH-AUDIT-022`).
+1. File clipboard policy: full file support or an explicit text-path mode (`CH-AUDIT-020`).
+2. Paste cancellation notifications (`CH-AUDIT-023`).
+3. Remaining privacy controls: retention settings, app/process denylist, and broader policy (`CH-AUDIT-009`).
+4. Additional GUI/manual smoke checks for real Win32 clipboard/tray behavior (`CH-AUDIT-008`).
+5. Remove UI blocking during substantial compaction (`CH-AUDIT-021`).
+6. Asynchronous search over large text histories (`CH-AUDIT-022`).

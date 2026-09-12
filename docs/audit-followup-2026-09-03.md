@@ -1,87 +1,94 @@
-# ClipboardHistory: повторный аудит ошибок и производительности
+# ClipboardHistory: follow-up bug and performance audit
 
-Дата: 2026-09-03. Базовый commit: `b7aeac62a22b4c2ecbe7edbef50d9e63088f85a0`.
-Проверены хранение, миграция, горячая клавиша, взаимодействие потоков с Tk,
-позиционирование popup и отмена callback при закрытии. Работа разделена между
-основным исполнителем и независимыми агентами с отдельным владением файлами.
+Date: 2026-09-03. Baseline commit: `b7aeac62a22b4c2ecbe7edbef50d9e63088f85a0`.
+Reviewed storage, migration, the hotkey, thread interaction with Tk,
+popup positioning, and callback cancellation on close. Work was divided between
+the primary contributor and independent agents with separate file ownership.
 
-## Исправления
+## Fixes
 
-- Исключение обработчика горячей клавиши больше не завершает message loop.
-  `UnregisterHotKey` и сброс состояния выполняются в `finally`. Остановка до
-  регистрации или во время неё учитывается через Event; очередь Windows создаётся
-  до публикации thread ID, чтобы `PostThreadMessage` мог доставить остановку.
-- Worker callbacks принимаются после начала обработки событий Tk и повторно
-  проверяют состояние при исполнении. Shutdown errors не уходят в поток hotkey
-  или tray. Постоянный polling timer для этого не добавляется.
-- Размер popup сопоставляется с work area в физических пикселях. При увеличенном
-  масштабе окно помещается на экране, при недостатке места уменьшается. Смена
-  масштаба повторно ограничивает позицию, сохраняя размещение окна, а не перенося
-  его к текущему cursor. Отрицательные monitor coordinates покрыты тестом.
-- Повторный focus-check теперь сохраняет timer ID. Закрытие отменяет его, поэтому
-  callback от предыдущего открытия не закрывает заново показанное окно.
-- Запрос списка истории перестал читать неиспользуемый image hash и поле
-  truncation у image rows. Это убирает обход больших SQLite overflow records.
-- Вставка text/image и retention cleanup выполняются одной транзакцией. Ошибка
-  cleanup откатывает вставку или смену pin вместе с maintenance state.
-- Мелкое удаление больше не запускает полный `VACUUM`. Compaction требует
-  одновременно 32 MiB свободных страниц и 25% свободного объёма.
-- Перенос legacy database создаёт проверенный SQLite snapshot с committed WAL,
-  затем публикует целый файл без перезаписи существующего destination. Ошибка
-  прерывает startup, исходная база остаётся доступной для восстановления.
+- A hotkey handler exception no longer terminates the message loop.
+  `UnregisterHotKey` and state reset run in `finally`. An Event handles stopping
+  before or during registration; the Windows queue is created before publishing
+  the thread ID so `PostThreadMessage` can deliver the stop request.
+- Worker callbacks are accepted after Tk starts processing events and check the
+  state again when executed. Shutdown errors do not escape into the hotkey or
+  tray thread. This does not add a permanent polling timer.
+- Popup size is compared with the work area in physical pixels. At increased
+  scaling, the window fits the screen and shrinks if space is insufficient.
+  Scaling changes constrain the position again while preserving the window's
+  placement instead of moving it to the current cursor. A test covers negative
+  monitor coordinates.
+- Repeated focus checks now retain the timer ID. Closing cancels the timer, so
+  a callback from an earlier opening cannot close the newly displayed window.
+- The history list query no longer reads the unused image hash or truncation
+  field for image rows. This avoids traversing large SQLite overflow records.
+- Text/image insertion and retention cleanup run in one transaction. A cleanup
+  failure rolls back the insertion or pin change together with maintenance state.
+- Small deletions no longer trigger a full `VACUUM`. Compaction requires both
+  32 MiB of free pages and 25% free space.
+- Legacy database migration creates a verified SQLite snapshot including committed
+  WAL data, then publishes the complete file without overwriting an existing
+  destination. Failure aborts startup; the source database remains available for
+  recovery.
 
-После успешной миграции legacy files остаются отдельной recovery copy. Очистка
-новой истории их не удаляет; это явно описано в README. Текущая пользовательская
-база и clipboard не использовались для проверки.
+After successful migration, legacy files remain as a separate recovery copy.
+Clearing the new history does not delete them; the README states this explicitly.
+The current user database and clipboard were not used for verification.
 
-## Производительность
+## Performance
 
-На временной базе с 240 MiB сгенерированных BLOB, пять последовательных пар
-сравнений дали median `get_history(50)` **70,756 → 0,170 ms**. Это запрос metadata,
-а не полный render popup или image decoding. После удаления одного BLOB размером
-2 MiB исходный код выполнял compaction 3073,5 ms; обновлённый пропустил её за
-0,085 ms. Полный database open не ускорился: integrity check сохранён.
+On a temporary database with 240 MiB of generated BLOBs, five consecutive paired
+comparisons gave a median `get_history(50)` of **70.756 → 0.170 ms**. This measures
+the metadata query, not full popup rendering or image decoding. After deleting
+one 2 MiB BLOB, the original code performed compaction in 3073.5 ms; the updated
+code skipped it in 0.085 ms. Full database opening did not become faster:
+integrity checking remains enabled.
 
-[Отдельный storage report](audit-storage-2026-09-03.md) содержит исходные JSON
-samples, воспроизводимый helper, границы сравнения и неустранённую задержку при
-значительной compaction. Windows logon и фактическое потребление CPU/RAM работающего
-приложения не измерялись.
+The [separate storage report](audit-storage-2026-09-03.md) contains the original
+JSON samples, a reproducible helper, comparison boundaries, and the unresolved
+delay during substantial compaction. Windows logon and actual CPU/RAM consumption
+of the running app were not measured.
 
-## Проверка
+## Verification
 
-- `python -m unittest discover -s tests`: **151 passed**, исходно 119.
+- `python -m unittest discover -s tests`: **151 passed**, baseline 119.
 - `python -m compileall -q main.pyw app tests`: passed.
 - `python -m ruff check .`: passed.
 - `git diff --check`: passed.
-- Новые regressions сначала воспроизвели ошибки hotkey/startup, popup clipping,
-  focus retry, partial transactions и WAL migration, затем прошли с исправлениями.
-- Проверены реальный SQLite WAL, rollback, failed/concurrent publication,
-  повреждённый источник, проверка staging snapshot и timeout backup.
-- Popup geometry сверена с установленным CustomTkinter **5.2.2**, включая его
-  `CTkToplevel._set_scaling` и `CTkScalingBaseClass._apply_geometry_scaling`.
-  Дополнительно использовано настоящее прозрачное Tk-окно без захвата фокуса:
-  при effective scale 1,875 размер 975×1059, позиция (935, 11); при scale 2,5 —
-  1300×1060, позиция (610, 10). Оба результата помещаются в test work area
-  1920×1080 с отступом. Это не physical mixed-monitor acceptance.
-- Проверки выполнялись имеющимся Python 3.13; зависимости не устанавливались.
-  Стандартный Ruff не включает `main.pyw`; явная проверка этого файла показывает
-  те же 16 существующих E402 из-за single-instance check перед импортами.
+- New regressions first reproduced hotkey/startup errors, popup clipping,
+  focus retry, partial transactions, and WAL migration issues, then passed with
+  the fixes.
+- Verified real SQLite WAL, rollback, failed/concurrent publication, a corrupted
+  source, staging snapshot validation, and backup timeout.
+- Popup geometry was checked against the installed CustomTkinter **5.2.2**,
+  including `CTkToplevel._set_scaling` and
+  `CTkScalingBaseClass._apply_geometry_scaling`. A real transparent Tk window
+  without focus capture was also used: at an effective scale of 1.875, its size
+  was 975×1059 at position (935, 11); at scale 2.5, it was 1300×1060 at
+  position (610, 10). Both fit within the 1920×1080 test work area with a margin.
+  This is not physical mixed-monitor acceptance.
+- Checks used the available Python 3.13; no dependencies were installed.
+  Default Ruff checking does not include `main.pyw`; explicitly checking that
+  file reports the same 16 existing E402 violations caused by the single-instance
+  check before imports.
 
-## Оставшиеся ограничения и ручная проверка
+## Remaining limitations and manual checks
 
-Существенная compaction по-прежнему синхронна: при удалении половины test database
-конкурентное чтение задерживается примерно на 1,5 s. Это отдельный открытый пункт
-`CH-AUDIT-021`. Остальные продуктовые вопросы — file-paste semantics, длинный текст,
-retention settings и process denylist — остаются в `audit.md`.
+Substantial compaction remains synchronous: deleting half the test database
+delays a concurrent read by about 1.5 s. This is a separate open item,
+`CH-AUDIT-021`. Other product questions—file-paste semantics, long text,
+retention settings, and a process denylist—remain in `audit.md`.
 
-После обычного перезапуска приложения:
+After a normal app restart:
 
-1. Несколько раз открыть `Ctrl+Shift+V`, закрыть и сразу открыть; проверить поиск,
-   выбор text/image и вставку в нужное окно.
-2. Проверить tray → Show/Quit, pause/resume и поведение при занятой горячей клавише.
-3. Открыть popup у границ экрана при 100/150/200% и перенести между физическими
-   мониторами с разным DPI; проверить доступность footer и image preview.
-4. После следующего входа в Windows подтвердить появление tray icon.
+1. Open with `Ctrl+Shift+V` several times, close and immediately reopen; check
+   search, text/image selection, and pasting into the intended window.
+2. Check tray → Show/Quit, pause/resume, and behavior when the hotkey is occupied.
+3. Open the popup near screen edges at 100/150/200% scaling and move between
+   physical monitors with different DPI; check that the footer and image preview
+   remain accessible.
+4. After the next Windows sign-in, confirm that the tray icon appears.
 
-Автозапуск, live clipboard, пользовательская история и запущенный экземпляр
-приложения в ходе этого аудита не изменялись.
+Autostart, the live clipboard, user history, and the running app instance were not
+changed during this audit.

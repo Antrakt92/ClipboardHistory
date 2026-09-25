@@ -7,14 +7,15 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from app.config import DB_PATH, MAX_HISTORY_SIZE, MAX_CONTENT_LENGTH, MAX_IMAGE_BYTES, PREVIEW_LENGTH
+from app.config import (DB_PATH, MAX_HISTORY_SIZE, MAX_CONTENT_LENGTH, MAX_IMAGE_BYTES, PREVIEW_LENGTH,
+                      DEFAULT_RETENTION_DAYS, MAX_RETENTION_DAYS)
 
 log = logging.getLogger(__name__)
 
 # Expiration applies only to unpinned entries. Keep the bound small enough that
 # a malformed setting cannot silently retain private history indefinitely.
-DEFAULT_RETENTION_DAYS = 30
-MAX_RETENTION_DAYS = 365
+# Bounds live in app.config (single source with load_privacy_settings);
+# re-exported here so existing imports keep working.
 # Keep deleted pages on SQLite's freelist for later writes. A live VACUUM can
 # block popup reads and new clipboard writes even on a separate WAL connection.
 # Columns after image_data traverse overflow pages; only text needs its trailing metadata.

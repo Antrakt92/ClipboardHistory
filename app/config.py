@@ -22,6 +22,12 @@ PRIVACY_SETTINGS_PATH = os.path.join(_DATA_DIR, "privacy.json")
 _OLD_DB = os.path.join(APP_DIR, "clipboard_history.db")
 
 
+# Single source for the unpinned-retention policy: app.database enforces the
+# same bounds through these names.
+DEFAULT_RETENTION_DAYS = 30
+MAX_RETENTION_DAYS = 365
+
+
 def ensure_data_dir(data_dir=_DATA_DIR):
     os.makedirs(data_dir, exist_ok=True)
 
@@ -33,14 +39,14 @@ def load_privacy_settings(path=None):
         with open(path, "r", encoding="utf-8") as source:
             value = json.load(source)
     except FileNotFoundError:
-        return {"retention_days": 30, "excluded_processes": ()}
+        return {"retention_days": DEFAULT_RETENTION_DAYS, "excluded_processes": ()}
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("Invalid privacy settings JSON") from exc
     if not isinstance(value, dict) or set(value) - {"retention_days", "excluded_processes"}:
         raise ValueError("Invalid privacy settings keys")
-    days = value.get("retention_days", 30)
-    if type(days) is not int or not 1 <= days <= 365:
-        raise ValueError("retention_days must be an integer from 1 to 365")
+    days = value.get("retention_days", DEFAULT_RETENTION_DAYS)
+    if type(days) is not int or not 1 <= days <= MAX_RETENTION_DAYS:
+        raise ValueError(f"retention_days must be an integer from 1 to {MAX_RETENTION_DAYS}")
     raw_exclusions = value.get("excluded_processes", [])
     if not isinstance(raw_exclusions, list) or len(raw_exclusions) > 64:
         raise ValueError("excluded_processes must be a list of at most 64 executable names")

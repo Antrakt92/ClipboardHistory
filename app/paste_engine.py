@@ -8,6 +8,7 @@ import win32clipboard
 from dataclasses import dataclass
 from typing import Optional
 
+from app.clipboard_access import try_open_clipboard
 from app.config import MAX_IMAGE_BYTES
 
 user32 = ctypes.windll.user32
@@ -106,15 +107,10 @@ class INPUT(ctypes.Structure):
 
 def _open_clipboard_retry(attempts=3, delay=0.05):
     """Try to open the clipboard with retries (another app may hold it briefly)."""
-    for i in range(attempts):
-        try:
-            win32clipboard.OpenClipboard()
-            return True
-        except Exception:
-            if i < attempts - 1:
-                time.sleep(delay)
-    log.warning("Failed to open clipboard after %d attempts", attempts)
-    return False
+    opened = try_open_clipboard(win32clipboard, attempts=attempts, delay=delay)
+    if not opened:
+        log.warning("Failed to open clipboard after %d attempts", attempts)
+    return opened
 
 
 class PasteEngine:

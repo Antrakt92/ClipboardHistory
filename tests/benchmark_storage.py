@@ -9,7 +9,6 @@ import statistics
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import types
 from pathlib import Path
@@ -58,50 +57,17 @@ def compaction_sample(database_class, path, delete_count):
         free_pages = db.conn.execute("PRAGMA freelist_count").fetchone()[0]
         total_pages = db.conn.execute("PRAGMA page_count").fetchone()[0]
         page_size = db.conn.execute("PRAGMA page_size").fetchone()[0]
-        if not hasattr(db, "_maybe_vacuum"):
-            # Current policy reuses free pages and never compacts on an app path.
-            _, history_ms = timed(db.get_history)
-            return {
-                "compaction_ms": 0.0,
-                "concurrent_history_ms": history_ms,
-                "vacuum_executed": False,
-                "free_mib": free_pages * page_size / 1024 / 1024,
-                "free_fraction": free_pages / total_pages if total_pages else 0,
-            }
-        started = threading.Event()
-        finished = threading.Event()
-        statements = []
-        measured = {}
-        errors = []
-        db._needs_vacuum = True
-        db._last_vacuum_time = 0
-        db.conn.set_progress_handler(lambda: started.set() or 0, 100)
-        db.conn.set_trace_callback(statements.append)
-
-        def compact():
-            try:
-                _, measured["compaction_ms"] = timed(db._maybe_vacuum)
-            except Exception as exc:
-                errors.append(exc)
-            finally:
-                finished.set()
-
-        worker = threading.Thread(target=compact)
-        worker.start()
-        while not started.wait(0.005) and not finished.is_set():
-            pass
-        _, measured["concurrent_history_ms"] = timed(db.get_history)
-        worker.join()
-        if errors:
-            raise errors[0]
-        db.conn.set_progress_handler(None, 0)
-        db.conn.set_trace_callback(None)
-        measured.update(
-            vacuum_executed="VACUUM" in statements,
-            free_mib=free_pages * page_size / 1024 / 1024,
-            free_fraction=free_pages / total_pages,
-        )
-        return measured
+        # Auto-VACUUM was removed from the app path: free pages are reused and
+        # offline compaction lives in tools/secure_compact.py, so no in-app
+        # vacuum is ever executed here.
+        _, history_ms = timed(db.get_history)
+        return {
+            "compaction_ms": 0.0,
+            "concurrent_history_ms": history_ms,
+            "vacuum_executed": False,
+            "free_mib": free_pages * page_size / 1024 / 1024,
+            "free_fraction": free_pages / total_pages if total_pages else 0,
+        }
     finally:
         db.close()
 

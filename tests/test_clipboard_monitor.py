@@ -10,6 +10,7 @@ from PIL import Image
 import app.clipboard_monitor as clipboard_monitor
 from app.clipboard_monitor import (
     CLIPBOARD_READ_BUSY,
+    CLIPBOARD_READ_ERROR,
     CLIPBOARD_READ_OK,
     ClipboardMonitor,
 )
@@ -206,6 +207,32 @@ class ClipboardMonitorImageTests(unittest.TestCase):
             self.assertIsNone(ClipboardMonitor._process_dib_image(header))
 
         dib_to_png.assert_not_called()
+
+    def test_short_dib_is_rejected(self):
+        self.assertIsNone(ClipboardMonitor._process_dib_image(bytes(10)))
+        self.assertIsNone(ClipboardMonitor._dib_to_png(bytes(10)))
+
+    def test_bad_header_size_dib_is_rejected(self):
+        header = bytearray(make_dib_header(32, 24))
+        struct.pack_into("<I", header, 0, 32)
+
+        self.assertIsNone(ClipboardMonitor._process_dib_image(bytes(header)))
+
+    def test_truncated_bitfields_dib_is_rejected(self):
+        header = bytearray(make_dib_header(32, 24))
+        struct.pack_into("<I", header, 16, 3)  # BI_BITFIELDS, no masks/pixels
+
+        self.assertIsNone(ClipboardMonitor._process_dib_image(bytes(header)))
+
+    def test_dib_to_png_validates_header_through_shared_helper(self):
+        dib = make_dib(32, 24)
+
+        with mock.patch.object(
+            ClipboardMonitor, "_dib_dimensions", return_value=None
+        ) as dimensions:
+            self.assertIsNone(ClipboardMonitor._dib_to_png(dib))
+
+        dimensions.assert_called_once_with(dib)
 
     def test_png_over_stored_cap_is_rejected_after_conversion(self):
         dib = make_dib(32, 24)
@@ -514,6 +541,37 @@ class ClipboardMonitorRetryTests(unittest.TestCase):
 
         self.assertEqual([(clipboard_monitor.CLIPBOARD_READ_KEY, None, None, None)], statuses)
         self.assertFalse(monitor._clipboard_read_issue_active)
+
+    def test_error_read_activates_clipboard_issue(self):
+        statuses = []
+        monitor = RetryMonitor(
+            [CLIPBOARD_READ_ERROR],
+            on_status=lambda *args: statuses.append(args),
+        )
+
+        monitor._read_clipboard()
+
+        self.assertTrue(monitor._clipboard_read_issue_active)
+        self.assertEqual(1, len(statuses))
+        self.assertEqual(clipboard_monitor.CLIPBOARD_READ_KEY, statuses[0][0])
+        self.assertEqual("Clipboard read failed", statuses[0][1])
+
+    def test_error_retry_activates_clipboard_issue(self):
+        statuses = []
+        timer_factory = FakeTimerFactory()
+        monitor = RetryMonitor(
+            [CLIPBOARD_READ_BUSY, CLIPBOARD_READ_ERROR],
+            on_status=lambda *args: statuses.append(args),
+            timer_factory=timer_factory,
+        )
+
+        monitor._read_clipboard()
+        timer_factory.timers[0].callback()
+
+        self.assertTrue(monitor._clipboard_read_issue_active)
+        self.assertEqual(1, len(statuses))
+        self.assertEqual(clipboard_monitor.CLIPBOARD_READ_KEY, statuses[0][0])
+        self.assertEqual("Clipboard read failed", statuses[0][1])
 
     def test_busy_read_schedules_one_retry_timer(self):
         timer_factory = FakeTimerFactory()

@@ -295,9 +295,8 @@ class PopupWindow(customtkinter.CTkToplevel):
 
         self._reset_clear_confirm(force=True)
 
-        # Load fresh data off the UI thread: a large history stalls a
-        # synchronous read (~165-265 ms on extreme synthetic volumes), so
-        # render a cheap placeholder and fetch the first page async.
+        # Load fresh data off the UI thread: render a cheap placeholder
+        # and fetch the first page async.
         self._show_loading_placeholder()
         self._request_search(None, reset=True)
 

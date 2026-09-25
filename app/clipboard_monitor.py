@@ -10,6 +10,7 @@ import time as _time
 import win32clipboard
 from PIL import Image
 
+from app.clipboard_access import try_open_clipboard
 from app.config import MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_RAW_IMAGE_BYTES
 
 log = logging.getLogger(__name__)
@@ -281,6 +282,8 @@ class ClipboardMonitor:
             self._clear_clipboard_read_issue()
         elif result == CLIPBOARD_READ_BUSY:
             self._schedule_clipboard_retry(0, expected_generation=generation)
+        else:
+            self._report_clipboard_read_error()
 
     def _read_clipboard_once(self, expected_generation=None):
         with self._retry_lock:
@@ -372,14 +375,7 @@ class ClipboardMonitor:
 
     @staticmethod
     def _try_open_clipboard(attempts=3, delay=0.05):
-        for attempt in range(attempts):
-            try:
-                win32clipboard.OpenClipboard()
-                return True
-            except Exception:
-                if attempt < attempts - 1:
-                    _time.sleep(delay)
-        return False
+        return try_open_clipboard(win32clipboard, attempts=attempts, delay=delay)
 
     def _schedule_clipboard_retry(self, retry_index, expected_generation=None):
         with self._retry_lock:
@@ -420,6 +416,8 @@ class ClipboardMonitor:
             self._clear_clipboard_read_issue()
         elif result == CLIPBOARD_READ_BUSY:
             self._schedule_clipboard_retry(retry_index, expected_generation=generation)
+        else:
+            self._report_clipboard_read_error()
 
     def _cancel_clipboard_retry(self):
         with self._retry_lock:
@@ -442,6 +440,19 @@ class ClipboardMonitor:
                 CLIPBOARD_READ_KEY,
                 "Clipboard busy",
                 "Could not read clipboard because another app kept it open.",
+            )
+
+    def _report_clipboard_read_error(self):
+        now = _time.time()
+        if now - self._last_clipboard_warning >= CLIPBOARD_BUSY_LOG_INTERVAL:
+            self._last_clipboard_warning = now
+            log.warning("Clipboard read failed with an unexpected error; update was skipped")
+        if not self._clipboard_read_issue_active:
+            self._clipboard_read_issue_active = True
+            self._notify_status(
+                CLIPBOARD_READ_KEY,
+                "Clipboard read failed",
+                "Could not read clipboard data due to an unexpected error.",
             )
 
     def _clear_clipboard_read_issue(self):
@@ -520,19 +531,16 @@ class ClipboardMonitor:
             return None
         return png_bytes
 
-    @staticmethod
-    def _dib_to_png(dib_data):
+    @classmethod
+    def _dib_to_png(cls, dib_data):
         try:
-            # BITMAPINFOHEADER is 40 bytes minimum; we read up to offset 35
-            if len(dib_data) < 40:
-                log.debug("DIB data too short (%d bytes), skipping", len(dib_data))
+            # Validate the header through the shared helper instead of
+            # re-parsing length/bi_size here.
+            if cls._dib_dimensions(dib_data) is None:
                 return None
 
             # Calculate correct pixel data offset from DIB header
             bi_size = struct.unpack_from('<I', dib_data, 0)[0]
-            if bi_size < 40:
-                log.debug("Invalid DIB header size %d, skipping", bi_size)
-                return None
 
             bit_count = struct.unpack_from('<H', dib_data, 14)[0]
             clr_used = struct.unpack_from('<I', dib_data, 32)[0]

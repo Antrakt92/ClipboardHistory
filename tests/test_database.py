@@ -240,6 +240,28 @@ class DatabaseTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_unicode_contains_fast_path_matches_casefold_semantics(self):
+        cases = (
+            ("hello world", "hello", True),
+            ("HELLO WORLD", "hello", True),
+            ("Straße", "STRASSE", True),
+            ("ß", "ss", True),
+            ("SS", "ss", True),
+            ("İ", "i̇", True),
+            ("Привет МИР", "ПРИВЕТ", True),
+            ("Привет МИР", "мир", True),
+            ("abc", "d", False),
+            ("", "x", False),
+            ("abc", "", True),
+            (None, "x", False),
+        )
+        for content, query, expected in cases:
+            with self.subTest(content=content, query=query):
+                folded = query.casefold()
+                self.assertEqual(expected, Database._unicode_contains(content, folded))
+                # Oracle: the previous pure-casefold behavior.
+                self.assertEqual(expected, folded in (content or "").casefold())
+
     def test_retention_days_rejects_invalid_values_before_opening_database(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = os.path.join(temp_dir, "history.db")

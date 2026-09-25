@@ -166,6 +166,17 @@ class ClipboardMonitor:
             self._thread.join(timeout)
 
     def set_ignore_next(self):
+        # A foreign update may be waiting on a busy-clipboard retry. Our own
+        # write is about to overwrite it, so read now: this is the last chance
+        # to record it. No pending retry means the clipboard holds already
+        # recorded content (or our previous paste), which must NOT be re-read.
+        with self._retry_lock:
+            retry_pending = self._retry_timer is not None
+        if retry_pending:
+            try:
+                self._read_clipboard_once()
+            except Exception:
+                log.debug("Pre-paste foreign clipboard read failed", exc_info=True)
         self._cancel_clipboard_retry()
         with self._ignore_lock:
             self._ignore_next = True

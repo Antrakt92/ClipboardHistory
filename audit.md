@@ -30,12 +30,12 @@ Priority: P3.
 
 `privacy.json` controls unpinned retention (1–365 days) and exact executable-name exclusions. Pinned entries still persist until explicitly removed. An exclusion uses the clipboard owner process, which may differ from the original content source, especially for shared browser/helper processes. When exclusions are configured and the owner cannot be identified, capture is skipped. This behavior needs live Win32 validation.
 
-Deleting or expiring entries reuses SQLite free pages but does not guarantee secure erasure. Legacy migration copies and quarantined databases may still hold older content. Removing automatic `VACUUM` eliminates its observed UI/database-read stall, but the file can remain at its high-water size.
+Deleting or expiring entries reuses SQLite free pages but does not guarantee secure erasure. Legacy migration copies and quarantined databases may still hold older content. Removing automatic `VACUUM` eliminates its observed UI/database-read stall, but the file can remain at its high-water size. An explicit offline workflow now exists (`tools/secure_compact.py`, dry-run by default, backup plus integrity verification, never touches the live database); it removes free pages from the active file but is not forensic erasure.
 
 Next steps:
 
 - Specify whether the product needs stronger source identification or a user-facing settings UI.
-- If secure disposal or file-size reduction is required, design an explicit offline workflow with backup, integrity verification, and clear failure/rollback behavior. Do not compact the active database in the UI path.
+- Validate the offline compaction workflow on a real Windows session with the app closed (dry-run first).
 
 ### CH-AUDIT-020 - File paths are intentionally text, pending product choice
 
@@ -50,6 +50,6 @@ Next steps:
 ## Checks for future changes
 
 - `python -m unittest discover -s tests`
-- `python -m compileall -q main.pyw app tests`
+- `python -m compileall -q main.pyw app tests tools`
 - `python -m ruff check .` (report if unavailable)
 - `git diff --check`

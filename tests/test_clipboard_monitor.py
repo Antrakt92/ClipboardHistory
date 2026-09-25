@@ -454,7 +454,9 @@ class ClipboardMonitorRetryTests(unittest.TestCase):
                 if paste.ident is not None:
                     paste.join(2)
 
-    def test_ignored_paste_update_cancels_retry_without_reading(self):
+    def test_ignored_paste_update_drains_pending_retry_before_cancelling(self):
+        # set_ignore_next takes a last-chance read of the pending foreign
+        # update before cancelling: the retry must not silently drop it.
         timer_factory = FakeTimerFactory()
         monitor = RetryMonitor([CLIPBOARD_READ_BUSY, CLIPBOARD_READ_OK], timer_factory=timer_factory)
         monitor._read_clipboard()
@@ -465,7 +467,7 @@ class ClipboardMonitorRetryTests(unittest.TestCase):
         timer.callback()
 
         self.assertTrue(timer.cancelled)
-        self.assertEqual(1, monitor.read_calls)
+        self.assertEqual(2, monitor.read_calls)
 
     def test_cancelled_timer_cannot_clear_or_replace_a_newer_retry(self):
         timer_factory = FakeTimerFactory()
@@ -594,6 +596,86 @@ class ClipboardMonitorRetryTests(unittest.TestCase):
         second_timer = timer_factory.timers[1]
         monitor.stop(timeout=0)
         self.assertTrue(second_timer.cancelled)
+
+
+class ClipboardMonitorPrePasteReadTests(unittest.TestCase):
+    """set_ignore_next must rescue a retry-pending foreign copy (P2-3)."""
+
+    def make_monitor(self, captured, busy_opens=3):
+        opens = []
+
+        def fake_open():
+            opens.append(1)
+            if len(opens) <= busy_opens:
+                raise RuntimeError("SYNTH busy clipboard")
+
+        patches = (
+            mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard", side_effect=fake_open),
+            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"),
+            mock.patch.object(
+                clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable",
+                side_effect=lambda fmt: fmt == clipboard_monitor.win32clipboard.CF_UNICODETEXT,
+            ),
+        )
+        return patches
+
+    def test_pending_foreign_copy_is_recorded_before_own_write(self):
+        captured = []
+        timer_factory = FakeTimerFactory()
+        monitor = ClipboardMonitor(lambda content, kind: captured.append((content, kind)),
+                                   timer_factory=timer_factory)
+        patches = self.make_monitor(captured)
+        for patch in patches:
+            patch.start()
+        self.addCleanup(lambda: [patch.stop() for patch in patches])
+        with mock.patch.object(
+            clipboard_monitor.win32clipboard, "GetClipboardData", return_value="SYNTH-B foreign",
+        ):
+            monitor._read_clipboard()  # busy -> retry armed
+            self.assertEqual(1, len(timer_factory.timers))
+            timer = timer_factory.timers[0]
+
+            monitor.set_ignore_next()  # last-chance read, then suppress own write
+            monitor._wnd_proc(0, clipboard_monitor.WM_CLIPBOARDUPDATE, 0, 0)
+            timer.callback()  # stale generation: no-op
+
+        self.assertEqual([("SYNTH-B foreign", "text")], captured)
+        self.assertTrue(timer.cancelled)
+
+    def test_still_busy_foreign_copy_is_lost_as_before(self):
+        captured = []
+        timer_factory = FakeTimerFactory()
+        monitor = ClipboardMonitor(lambda content, kind: captured.append((content, kind)),
+                                   timer_factory=timer_factory)
+        patches = self.make_monitor(captured, busy_opens=10 ** 9)
+        for patch in patches:
+            patch.start()
+        self.addCleanup(lambda: [patch.stop() for patch in patches])
+        with mock.patch.object(
+            clipboard_monitor.win32clipboard, "GetClipboardData", return_value="SYNTH-B foreign",
+        ):
+            monitor._read_clipboard()
+            monitor.set_ignore_next()
+            monitor._wnd_proc(0, clipboard_monitor.WM_CLIPBOARDUPDATE, 0, 0)
+
+        self.assertEqual([], captured)
+
+    def test_no_pending_retry_means_no_extra_read(self):
+        # Without a pending retry the clipboard holds already recorded
+        # content (or our previous paste): re-reading would resurrect it.
+        captured = []
+        monitor = ClipboardMonitor(lambda content, kind: captured.append((content, kind)))
+        patches = self.make_monitor(captured, busy_opens=0)
+        for patch in patches:
+            patch.start()
+        self.addCleanup(lambda: [patch.stop() for patch in patches])
+        with mock.patch.object(
+            clipboard_monitor.win32clipboard, "GetClipboardData", return_value="SYNTH-E previous paste",
+        ):
+            monitor.set_ignore_next()
+            monitor._wnd_proc(0, clipboard_monitor.WM_CLIPBOARDUPDATE, 0, 0)
+
+        self.assertEqual([], captured)
 
 
 if __name__ == "__main__":

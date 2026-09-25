@@ -30,7 +30,9 @@ log = logging.getLogger(__name__)
 # Fix GetForegroundWindow to return pointer-sized HWND (not truncated c_int on x64)
 ctypes.windll.user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
 
-from app.config import DB_PATH, ICON_PATH, LOG_PATH, ensure_data_dir, migrate_legacy_db
+from app.config import (
+    DB_PATH, ICON_PATH, LOG_PATH, ensure_data_dir, load_privacy_settings, migrate_legacy_db,
+)
 from app.database import Database
 from app.clipboard_monitor import ClipboardMonitor
 from app.hotkey_manager import HotkeyManager
@@ -48,6 +50,11 @@ class ClipboardHistoryApp:
         ensure_data_dir()
         configure_logging(LOG_PATH)
         migrate_legacy_db()
+        try:
+            privacy_settings = load_privacy_settings()
+        except (OSError, ValueError):
+            log.error("Invalid privacy settings; clipboard capture will not start")
+            raise
         self.status_store = RuntimeStatusStore()
         self.recording_state = RecordingState()
 
@@ -66,12 +73,13 @@ class ClipboardHistoryApp:
         self.popup = None
 
         try:
-            self.db = Database(DB_PATH)
+            self.db = Database(DB_PATH, retention_days=privacy_settings["retention_days"])
 
             self.monitor = ClipboardMonitor(
                 on_new_content=self._on_clipboard_change,
                 on_status=self._on_component_status,
                 should_record=lambda: not self.recording_state.is_paused(),
+                excluded_processes=privacy_settings["excluded_processes"],
             )
             self.monitor.start()
             if not self.monitor.wait_ready():
@@ -201,12 +209,19 @@ class ClipboardHistoryApp:
 
             customtkinter.set_appearance_mode("Dark")
             customtkinter.set_default_color_theme("blue")
-            self.popup = PopupWindow(self.root, self.db, self.paste_engine, self.monitor)
+            self.popup = PopupWindow(
+                self.root, self.db, self.paste_engine, self.monitor,
+                on_notice=self._notify_paste_status,
+            )
             self._refresh_status_ui()
         if self.popup.is_visible:
             self.popup.focus()
             return
         self.popup.show(prev_hwnd)
+
+    def _notify_paste_status(self, message):
+        if self.tray:
+            self.tray.notify(message)
 
     def _stop_components(self):
         """Stop all started components safely (used by quit and init-failure cleanup)."""

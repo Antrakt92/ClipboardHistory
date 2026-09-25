@@ -69,6 +69,7 @@ class PasteCompletion:
     expected_input_count: int
     send_error: Optional[int]
     success: bool
+    reason: Optional[str] = None
 
 
 class KEYBDINPUT(ctypes.Structure):
@@ -220,6 +221,16 @@ class PasteEngine:
             not target_valid or not focus_succeeded or not modifiers_released or not clipboard_unchanged
             or user32.GetForegroundWindow() != target_hwnd
         ):
+            if not target_valid:
+                reason = "invalid_target"
+            elif not focus_succeeded:
+                reason = "focus_denied"
+            elif not modifiers_released:
+                reason = "modifiers_held"
+            elif not clipboard_unchanged:
+                reason = "clipboard_changed"
+            else:
+                reason = "focus_changed"
             return PasteCompletion(
                 target_hwnd=target_hwnd,
                 target_valid=target_valid,
@@ -230,6 +241,7 @@ class PasteEngine:
                 expected_input_count=EXPECTED_INPUT_COUNT,
                 send_error=None,
                 success=False,
+                reason=reason,
             )
 
         # Ctrl+V via SendInput (more reliable than deprecated keybd_event)
@@ -265,6 +277,7 @@ class PasteEngine:
             expected_input_count=EXPECTED_INPUT_COUNT,
             send_error=send_error,
             success=success,
+            reason=None if success else "send_input_incomplete",
         )
 
     @staticmethod
@@ -325,7 +338,9 @@ class PasteEngine:
         # Closing a write can synthesize formats and advance the sequence. Reopen
         # read-only and confirm our payload before trusting the post-close sequence.
         try:
-            if not _open_clipboard_retry(attempts=1):
+            # Another process can briefly own the clipboard immediately after
+            # our close. Retry the readback while still validating exact bytes.
+            if not _open_clipboard_retry(attempts=3, delay=0.025):
                 return None
             try:
                 if not win32clipboard.IsClipboardFormatAvailable(content_format):

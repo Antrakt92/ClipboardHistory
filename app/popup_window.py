@@ -3,6 +3,8 @@ import ctypes
 import ctypes.wintypes
 import io
 import logging
+import queue
+import threading
 import tkinter as tk
 import time
 
@@ -183,6 +185,15 @@ def _format_text_metadata(entry):
     return ""
 
 
+def _format_text_preview(entry):
+    preview = entry.get("preview") or ""
+    if len(preview) > PREVIEW_MAX_CHARS:
+        preview = preview[:PREVIEW_MAX_CHARS] + "..."
+    if entry.get("content_type") == "file_paths":
+        return f"FILE PATHS (text)  ·  {preview}"
+    return preview
+
+
 def _set_bg_recursive(widget, bg):
     """Set background color on widget and all descendants."""
     try:
@@ -196,11 +207,12 @@ def _set_bg_recursive(widget, bg):
 class PopupWindow(customtkinter.CTkToplevel):
     """Persistent popup window — created once, shown/hidden on demand."""
 
-    def __init__(self, master, database, paste_engine, monitor=None):
+    def __init__(self, master, database, paste_engine, monitor=None, on_notice=None):
         super().__init__(master)
         self.db = database
         self.paste_engine = paste_engine
         self.monitor = monitor
+        self.on_notice = on_notice
         self._visible = False
 
         self._prev_hwnd = None
@@ -209,6 +221,16 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._item_frames = []
         self._item_data = []
         self._search_after_id = None
+        self._search_poll_after_id = None
+        self._search_generation = 0
+        self._search_pending = False
+        self._search_requested_query = None
+        self._search_job = None
+        self._search_worker_running = False
+        self._search_lock = threading.Lock()
+        self._search_results = queue.Queue()
+        self._search_thread_factory = threading.Thread
+        self._paste_thread_factory = threading.Thread
         self._last_search_text = ""
         self._loaded_limit = HISTORY_PAGE_SIZE
         self._current_search_query = None
@@ -274,6 +296,7 @@ class PopupWindow(customtkinter.CTkToplevel):
 
         # Load fresh data
         self._load_items(reset=True)
+        self._search_requested_query = None
 
         # Reset scroll to top
         try:
@@ -340,6 +363,16 @@ class PopupWindow(customtkinter.CTkToplevel):
             except Exception:
                 pass
             self._search_after_id = None
+        self._search_generation += 1
+        self._search_pending = False
+        with self._search_lock:
+            self._search_job = None
+        if self._search_poll_after_id is not None:
+            try:
+                self.after_cancel(self._search_poll_after_id)
+            except Exception:
+                pass
+            self._search_poll_after_id = None
         self._reset_clear_confirm(force=True)
 
         self.withdraw()
@@ -503,7 +536,8 @@ class PopupWindow(customtkinter.CTkToplevel):
     # Item list (all plain tk for speed)
     # ------------------------------------------------------------------
 
-    def _load_items(self, search_query=None, reset=False, preserve_scroll=False):
+    def _load_items(self, search_query=None, reset=False, preserve_scroll=False, page=None,
+                    search_error=False):
         if not self._visible:
             return
 
@@ -529,17 +563,21 @@ class PopupWindow(customtkinter.CTkToplevel):
         old_cache = self._thumb_cache
         self._thumb_cache = {}
 
-        entries, self._total_items = self.db.get_history_page(
-            limit=max(HISTORY_PAGE_SIZE, self._loaded_limit),
-            search_query=self._current_search_query,
-        )
+        if page is None:
+            entries, self._total_items = self.db.get_history_page(
+                limit=max(HISTORY_PAGE_SIZE, self._loaded_limit),
+                search_query=self._current_search_query,
+            )
+        else:
+            entries, self._total_items = page
         self._loaded_limit = _clamp_history_limit(self._loaded_limit, self._total_items)
 
         if not entries:
             empty = tk.Label(
                 self._items_inner,
-                text=("No matches\nTry a different search" if self._current_search_query
-                      else "Nothing here yet\nCopy something to get started"),
+                text=("Search unavailable\nTry again" if search_error else
+                      "No matches\nTry a different search" if self._current_search_query else
+                      "Nothing here yet\nCopy something to get started"),
                 font=("Segoe UI", 12), fg=TEXT_DIM, bg=BG, justify="center"
             )
             empty.pack(pady=50)
@@ -594,10 +632,12 @@ class PopupWindow(customtkinter.CTkToplevel):
     def _load_more_items(self):
         if not self._visible:
             return
+        if self._search_pending:
+            return
         if self._loaded_limit >= self._total_items:
             return
         self._loaded_limit += HISTORY_PAGE_SIZE
-        self._load_items(reset=False, preserve_scroll=True)
+        self._request_search(self._current_search_query, reset=False, preserve_scroll=True)
 
     def _create_item_widget(self, entry, index, old_thumb_cache=None):
         is_pinned = entry["pinned"]
@@ -635,10 +675,7 @@ class PopupWindow(customtkinter.CTkToplevel):
             bot.pack(fill="x")
             clickable.append(bot)
         else:
-            preview_text = entry["preview"] or ""
-
-            if len(preview_text) > PREVIEW_MAX_CHARS:
-                preview_text = preview_text[:PREVIEW_MAX_CHARS] + "..."
+            preview_text = _format_text_preview(entry)
 
             preview = tk.Label(
                 frame, text=preview_text,
@@ -866,17 +903,78 @@ class PopupWindow(customtkinter.CTkToplevel):
             query = self.search_entry.get().strip() or None
         except Exception:
             return
-        self._load_items(query, reset=True)
+        self._request_search(query, reset=True)
+
+    def _request_search(self, query, reset=False, preserve_scroll=False):
+        """Keep only the latest requested page; never query a large search on Tk."""
+        self._search_generation += 1
+        generation = self._search_generation
+        self._search_requested_query = query
+        self._search_pending = True
+        limit = HISTORY_PAGE_SIZE if reset else max(HISTORY_PAGE_SIZE, self._loaded_limit)
+        with self._search_lock:
+            self._search_job = (generation, query, limit, reset, preserve_scroll)
+            start_worker = not self._search_worker_running
+            if start_worker:
+                self._search_worker_running = True
+        if start_worker:
+            try:
+                self._search_thread_factory(target=self._run_search_worker, daemon=True).start()
+            except (RuntimeError, OSError):
+                log.exception("Failed to start history search worker")
+                with self._search_lock:
+                    self._search_worker_running = False
+                    self._search_job = None
+                self._search_pending = False
+                self._load_items(query, reset=reset, page=([], 0), search_error=True)
+                return
+        if self._search_poll_after_id is None:
+            self._search_poll_after_id = self.after(30, self._poll_search_results)
+
+    def _run_search_worker(self):
+        while True:
+            with self._search_lock:
+                job = self._search_job
+                self._search_job = None
+                if job is None:
+                    self._search_worker_running = False
+                    return
+            generation, query, limit, reset, preserve_scroll = job
+            try:
+                page = self.db.search_history_page(limit=limit, search_query=query)
+            except Exception:
+                log.exception("History search failed")
+                page = None
+            self._search_results.put((generation, query, reset, preserve_scroll, page))
+
+    def _poll_search_results(self):
+        self._search_poll_after_id = None
+        while True:
+            try:
+                generation, query, reset, preserve_scroll, page = self._search_results.get_nowait()
+            except queue.Empty:
+                break
+            if not self._visible or generation != self._search_generation:
+                continue
+            self._search_pending = False
+            if page is not None:
+                self._load_items(query, reset=reset, preserve_scroll=preserve_scroll, page=page)
+            else:
+                self._load_items(query, reset=reset, page=([], 0), search_error=True)
+        if self._visible and self._search_pending:
+            self._search_poll_after_id = self.after(30, self._poll_search_results)
 
     def _ensure_current_search(self):
         """Refresh stale rows and cancel the action that targeted their old selection."""
         if not self._visible:
             return False
         query = self.search_entry.get().strip() or None
-        if query != self._current_search_query:
+        if query != self._search_requested_query and (self._search_pending or query != self._current_search_query):
             self._do_search()
             return False
-        return True
+        if self._search_pending:
+            return False
+        return query == self._current_search_query
 
     # ------------------------------------------------------------------
     # Navigation
@@ -888,7 +986,8 @@ class PopupWindow(customtkinter.CTkToplevel):
         return SURFACE
 
     def _navigate(self, direction):
-        self._ensure_current_search()
+        if not self._ensure_current_search():
+            return
         if not self._item_frames:
             return
 
@@ -972,7 +1071,17 @@ class PopupWindow(customtkinter.CTkToplevel):
         image_data = entry.get("image_data") if content_type == "image" else None
 
         self.close()
+        if content_type == "image":
+            # PNG-to-DIB conversion can be expensive; Tk must not wait for it.
+            self._paste_thread_factory(
+                target=self._start_paste,
+                args=(entry_id, content, content_type, prev_hwnd, image_data),
+                daemon=True,
+            ).start()
+        else:
+            self._start_paste(entry_id, content, content_type, prev_hwnd, image_data)
 
+    def _start_paste(self, entry_id, content, content_type, prev_hwnd, image_data):
         start_result = self.paste_engine.paste(
             content,
             content_type,
@@ -990,6 +1099,21 @@ class PopupWindow(customtkinter.CTkToplevel):
                 entry_id,
                 start_result.reason,
             )
+            self._schedule_paste_notice(start_result.clipboard_set)
+
+    def _schedule_paste_notice(self, clipboard_set):
+        try:
+            self.after(0, lambda: self._notify_paste_result(clipboard_set))
+        except Exception:
+            log.exception("Failed to schedule paste notice")
+
+    def _notify_paste_result(self, clipboard_set):
+        if self.on_notice:
+            message = (
+                "Copied to clipboard; automatic paste cancelled"
+                if clipboard_set else "Could not copy to clipboard"
+            )
+            self.on_notice(message)
 
     def _schedule_paste_completion(self, entry_id, completion):
         try:
@@ -1007,18 +1131,19 @@ class PopupWindow(customtkinter.CTkToplevel):
                 completion.send_input_count,
                 completion.expected_input_count,
             )
+            self._notify_paste_result(True)
 
     def _toggle_pin(self, entry_id):
         if not self._ensure_current_search():
             return
         self.db.toggle_pin(entry_id)
-        self._load_items(reset=False)
+        self._request_search(self._current_search_query)
 
     def _delete_item(self, entry_id):
         if not self._ensure_current_search():
             return
         self.db.delete_entry(entry_id)
-        self._load_items(reset=False)
+        self._request_search(self._current_search_query)
 
     def _clear_unpinned(self):
         self._confirm_clear_action(CLEAR_UNPINNED_ACTION)
@@ -1030,7 +1155,7 @@ class PopupWindow(customtkinter.CTkToplevel):
         if self._pending_clear_action == action:
             self._run_clear_action(action)
             self._reset_clear_confirm(force=True)
-            self._load_items(reset=False)
+            self._request_search(self._current_search_query)
             return
 
         self._pending_clear_action = action

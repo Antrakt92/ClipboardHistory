@@ -14,6 +14,20 @@ from app import startup_launcher
 
 
 class StartupLauncherTests(unittest.TestCase):
+    def test_launcher_status_rejects_missing_and_modified_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "ClipboardHistory.exe"
+            inputs = {"source": "source fixture", "icon": "icon fixture"}
+            self.assertFalse(startup_launcher.launcher_is_current(target, inputs))
+            target.write_bytes(b"synthetic launcher")
+            target.with_suffix(".json").write_text(
+                json.dumps(dict(inputs, executable=startup_launcher._sha256(target))),
+                encoding="utf-8",
+            )
+            self.assertTrue(startup_launcher.launcher_is_current(target, inputs))
+            target.write_bytes(b"changed")
+            self.assertFalse(startup_launcher.launcher_is_current(target, inputs))
+
     def test_native_branding_launch_and_reuse_with_special_character_paths(self):
         with tempfile.TemporaryDirectory(prefix="Clipboard ! & O'Brien ") as directory, \
                 mock.patch.dict(os.environ, {"LOCALAPPDATA": directory}):
@@ -22,6 +36,9 @@ class StartupLauncherTests(unittest.TestCase):
             language, codepage = translations[0]
             field = r"\StringFileInfo\%04x%04x\FileDescription" % (language, codepage)
             self.assertEqual(win32api.GetFileVersionInfo(launcher, field), "ClipboardHistory")
+            version = win32api.GetFileVersionInfo(launcher, "\\")
+            self.assertEqual(version["FileVersionMS"], (1 << 16) | 0)
+            self.assertEqual(version["FileVersionLS"], (2 << 16) | 0)
             large, small = win32gui.ExtractIconEx(launcher, 0, 1)
             self.assertTrue(large and small)
             for handle in large + small:

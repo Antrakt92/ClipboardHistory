@@ -1,4 +1,6 @@
 import unittest
+import queue
+import threading
 from types import SimpleNamespace
 from unittest import mock
 
@@ -19,6 +21,7 @@ from app.popup_window import (
     _clamp_history_limit,
     _format_history_count,
     _format_text_metadata,
+    _format_text_preview,
     _should_show_load_more,
 )
 
@@ -114,6 +117,16 @@ class PopupPreviewPositionTests(unittest.TestCase):
 
 
 class PopupHistoryFooterTests(unittest.TestCase):
+    def test_file_path_preview_explicitly_says_it_is_text(self):
+        entry = {"content_type": "file_paths", "preview": r"C:\Synthetic\report.txt"}
+        self.assertEqual(
+            "FILE PATHS (text)  ·  C:\\Synthetic\\report.txt",
+            _format_text_preview(entry),
+        )
+        self.assertEqual("ordinary", _format_text_preview({
+            "content_type": "text", "preview": "ordinary",
+        }))
+
     def test_truncated_text_label_states_exact_saved_prefix(self):
         self.assertEqual("First 50,000 of 60,123 chars", _format_text_metadata({
             "content_len": 60123, "truncated": True,
@@ -210,6 +223,8 @@ class FakePopup:
         self.closed = False
         self.after_calls = []
         self.after_should_fail = False
+        self.notices = []
+        self.on_notice = self.notices.append
 
     def close(self):
         self.closed = True
@@ -229,6 +244,15 @@ class FakePopup:
 
     def _handle_paste_completion(self, entry_id, completion):
         return PopupWindow._handle_paste_completion(self, entry_id, completion)
+
+    def _start_paste(self, *args):
+        return PopupWindow._start_paste(self, *args)
+
+    def _schedule_paste_notice(self, clipboard_set):
+        return PopupWindow._schedule_paste_notice(self, clipboard_set)
+
+    def _notify_paste_result(self, clipboard_set):
+        return PopupWindow._notify_paste_result(self, clipboard_set)
 
 
 class FakeStatusLabel:
@@ -338,6 +362,7 @@ class FakeClearPopup:
         self.after_callbacks = {}
         self.after_cancelled = []
         self.load_calls = []
+        self._current_search_query = None
 
     def after(self, delay, callback):
         after_id = f"after-{len(self.after_callbacks) + 1}"
@@ -347,8 +372,8 @@ class FakeClearPopup:
     def after_cancel(self, after_id):
         self.after_cancelled.append(after_id)
 
-    def _load_items(self, reset=False):
-        self.load_calls.append(reset)
+    def _request_search(self, query, reset=False):
+        self.load_calls.append((query, reset))
 
     def _cancel_clear_reset_timer(self):
         return PopupWindow._cancel_clear_reset_timer(self)
@@ -389,7 +414,7 @@ class PopupClearActionTests(unittest.TestCase):
 
         self.assertEqual(1, popup.db.clear_unpinned_calls)
         self.assertEqual(0, popup.db.clear_all_calls)
-        self.assertEqual([False], popup.load_calls)
+        self.assertEqual([(None, False)], popup.load_calls)
         self.assertIsNone(popup._pending_clear_action)
         self.assertEqual(CLEAR_UNPINNED_LABEL, popup._clear_unpinned_btn.text)
 
@@ -401,7 +426,7 @@ class PopupClearActionTests(unittest.TestCase):
 
         self.assertEqual(0, popup.db.clear_unpinned_calls)
         self.assertEqual(1, popup.db.clear_all_calls)
-        self.assertEqual([False], popup.load_calls)
+        self.assertEqual([(None, False)], popup.load_calls)
         self.assertIsNone(popup._pending_clear_action)
         self.assertEqual(DELETE_ALL_LABEL, popup._delete_all_btn.text)
 
@@ -445,6 +470,7 @@ class PopupPasteActionTests(unittest.TestCase):
 
         self.assertEqual([], popup.db.touched)
         self.assertIsNotNone(paste_engine.on_complete)
+        self.assertEqual(["Could not copy to clipboard"], popup.notices)
 
     def test_successful_completion_touches_entry_through_after(self):
         paste_engine = FakePasteEngine()
@@ -465,6 +491,32 @@ class PopupPasteActionTests(unittest.TestCase):
             paste_engine.on_complete(make_completion(success=False))
 
         self.assertEqual([], popup.db.touched)
+        self.assertEqual(["Copied to clipboard; automatic paste cancelled"], popup.notices)
+
+    def test_image_conversion_starts_only_on_worker(self):
+        paste_engine = FakePasteEngine()
+        popup = FakePopup(paste_engine)
+        popup.db.entries[2] = {
+            "id": 2, "content": "", "content_type": "image", "image_data": b"synthetic",
+        }
+        workers = []
+
+        class DeferredThread:
+            def __init__(self, target, args, daemon):
+                self.target = target
+                self.args = args
+                self.daemon = daemon
+
+            def start(self):
+                workers.append(self)
+
+        popup._paste_thread_factory = DeferredThread
+        PopupWindow._on_item_click(popup, 2)
+        self.assertTrue(popup.closed)
+        self.assertEqual([], paste_engine.calls)
+        self.assertTrue(workers[0].daemon)
+        workers[0].target(*workers[0].args)
+        self.assertEqual("image", paste_engine.calls[0][1])
 
     def test_after_failure_is_logged_and_does_not_touch_entry(self):
         paste_engine = FakePasteEngine()
@@ -480,6 +532,99 @@ class PopupPasteActionTests(unittest.TestCase):
 
 
 class PopupSearchSafetyTests(unittest.TestCase):
+    def make_async_popup(self):
+        popup = object.__new__(PopupWindow)
+        popup._visible = True
+        popup._search_generation = 0
+        popup._search_pending = False
+        popup._search_requested_query = None
+        popup._current_search_query = None
+        popup._search_job = None
+        popup._search_worker_running = False
+        popup._search_lock = threading.Lock()
+        popup._search_results = queue.Queue()
+        popup._search_poll_after_id = None
+        popup._loaded_limit = HISTORY_PAGE_SIZE
+        popup.db = mock.Mock()
+        popup.db.search_history_page.side_effect = lambda limit, search_query: ([{"id": search_query}], 1)
+        popup.after = mock.Mock(return_value="poll")
+        popup._load_items = mock.Mock()
+        workers = []
+
+        class DeferredThread:
+            def __init__(self, target, daemon):
+                self.target = target
+                self.daemon = daemon
+
+            def start(self):
+                workers.append(self)
+
+        popup._search_thread_factory = DeferredThread
+        return popup, workers
+
+    def test_search_runs_off_ui_thread_and_discards_superseded_result(self):
+        popup, workers = self.make_async_popup()
+        popup._request_search("старый", reset=True)
+        popup._request_search("новый", reset=True)
+        popup.db.search_history_page.assert_not_called()
+        self.assertEqual(1, len(workers))
+        workers[0].target()
+        popup._poll_search_results()
+        popup.db.search_history_page.assert_called_once_with(limit=HISTORY_PAGE_SIZE, search_query="новый")
+        popup._load_items.assert_called_once_with(
+            "новый", reset=True, preserve_scroll=False, page=([{"id": "новый"}], 1)
+        )
+        self.assertFalse(popup._search_pending)
+
+    def test_inflight_search_cannot_replace_newer_query(self):
+        popup, workers = self.make_async_popup()
+
+        def fetch(limit, search_query):
+            if search_query == "old":
+                popup._request_search("new", reset=True)
+            return ([{"id": search_query}], 1)
+
+        popup.db.search_history_page.side_effect = fetch
+        popup._request_search("old", reset=True)
+        workers[0].target()
+        popup._poll_search_results()
+        self.assertEqual(["old", "new"], [call.kwargs["search_query"] for call in popup.db.search_history_page.call_args_list])
+        popup._load_items.assert_called_once_with(
+            "new", reset=True, preserve_scroll=False, page=([{"id": "new"}], 1)
+        )
+
+    def test_closed_generation_never_renders_after_reopen(self):
+        popup, workers = self.make_async_popup()
+        popup._request_search("before", reset=True)
+        popup._visible = False
+        popup._search_generation += 1
+        popup._search_pending = False
+        workers[0].target()
+        popup._visible = True
+        popup._poll_search_results()
+        popup._load_items.assert_not_called()
+
+    def test_pending_search_rejects_action_on_old_row(self):
+        popup, _workers = self.make_async_popup()
+        popup.search_entry = mock.Mock()
+        popup.search_entry.get.return_value = "new"
+        popup._search_requested_query = "new"
+        popup._search_pending = True
+        popup._current_search_query = "old"
+        self.assertFalse(popup._ensure_current_search())
+
+    def test_worker_start_failure_clears_pending_and_old_selection(self):
+        popup, _workers = self.make_async_popup()
+        popup._search_thread_factory = mock.Mock(side_effect=RuntimeError("thread unavailable"))
+        with self.assertLogs("app.popup_window", level="ERROR"):
+            popup._request_search("new", reset=True)
+        self.assertFalse(popup._search_pending)
+        self.assertFalse(popup._search_worker_running)
+        self.assertIsNone(popup._search_job)
+        popup._load_items.assert_called_once_with(
+            "new", reset=True, page=([], 0), search_error=True,
+        )
+
     def test_empty_search_results_are_distinct_from_empty_history_and_use_one_page_query(self):
         for query, message in (
             ("missing", "No matches\nTry a different search"),
@@ -505,6 +650,8 @@ class PopupSearchSafetyTests(unittest.TestCase):
         popup = object.__new__(PopupWindow)
         popup._visible = True
         popup._current_search_query = loaded_query
+        popup._search_requested_query = loaded_query
+        popup._search_pending = False
         popup._search_after_id = "pending-search"
         popup.search_entry = mock.Mock()
         popup.search_entry.get.return_value = query
@@ -519,7 +666,7 @@ class PopupSearchSafetyTests(unittest.TestCase):
             popup._selected_index = -1
             popup._current_search_query = args[0]
 
-        popup._load_items = mock.Mock(side_effect=load)
+        popup._request_search = mock.Mock(side_effect=load)
         return popup
 
     def test_delete_in_search_field_never_deletes_history(self):
@@ -539,7 +686,7 @@ class PopupSearchSafetyTests(unittest.TestCase):
                 popup = self.make_popup(query="new search")
                 getattr(popup, action)()
                 getattr(popup, effect).assert_not_called()
-                popup._load_items.assert_called_once_with("new search", reset=True)
+                popup._request_search.assert_called_once_with("new search", reset=True)
                 popup.after_cancel.assert_called_once_with("pending-search")
                 self.assertIsNone(popup._search_after_id)
 
@@ -553,7 +700,7 @@ class PopupSearchSafetyTests(unittest.TestCase):
         popup = self.make_popup(query="current", loaded_query="current")
         popup._paste_selected()
         popup._on_item_click.assert_called_once_with(1)
-        popup._load_items.assert_not_called()
+        popup._request_search.assert_not_called()
 
 
 if __name__ == "__main__":

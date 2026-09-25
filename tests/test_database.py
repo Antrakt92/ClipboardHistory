@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from app.config import MAX_CONTENT_LENGTH, MAX_HISTORY_SIZE, MAX_IMAGE_BYTES
-from app.database import Database, VACUUM_MIN_FREE_BYTES
+from app.database import Database, MAX_RETENTION_DAYS
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +59,85 @@ def insert_text_entry(db, content, pinned=0, timestamp=None):
 
 
 class DatabaseTests(unittest.TestCase):
+    def test_search_connection_does_not_wait_for_shared_database_lock(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                db.add_entry("Привет synthetic")
+                result = []
+                finished = threading.Event()
+
+                def search():
+                    try:
+                        result.append(db.search_history_page(search_query="ПРИВЕТ"))
+                    finally:
+                        finished.set()
+
+                with db.lock:
+                    worker = threading.Thread(target=search, daemon=True)
+                    worker.start()
+                    self.assertTrue(finished.wait(2), "search waited for shared database lock")
+                worker.join(2)
+                self.assertEqual(1, result[0][1])
+                self.assertEqual("Привет synthetic", result[0][0][0]["preview"])
+            finally:
+                db.close()
+
+    def test_slow_search_does_not_block_new_history_read(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            entered = threading.Event()
+            release = threading.Event()
+            worker = None
+            reader = None
+            try:
+                db.add_entry("Привет synthetic")
+                original_contains = db._unicode_contains
+
+                def slow_contains(content, query):
+                    entered.set()
+                    release.wait(5)
+                    return original_contains(content, query)
+
+                with mock.patch.object(db, "_unicode_contains", side_effect=slow_contains):
+                    worker = threading.Thread(
+                        target=lambda: db.search_history_page(search_query="ПРИВЕТ"),
+                        daemon=True,
+                    )
+                    worker.start()
+                    self.assertTrue(entered.wait(2))
+                    # The old design held db.lock throughout the slow Unicode scan.
+                    result = []
+                    read_finished = threading.Event()
+
+                    def read_current():
+                        try:
+                            result.append(db.get_history_page())
+                        finally:
+                            read_finished.set()
+
+                    reader = threading.Thread(target=read_current, daemon=True)
+                    reader.start()
+                    self.assertTrue(read_finished.wait(1), "slow search blocked history read")
+                    entries, total = result[0]
+                    self.assertEqual((1, "Привет synthetic"), (total, entries[0]["preview"]))
+            finally:
+                release.set()
+                if worker is not None:
+                    worker.join(2)
+                if reader is not None:
+                    reader.join(2)
+                db.close()
+
+    def test_in_memory_search_uses_existing_connection(self):
+        db = Database(":memory:")
+        try:
+            db.add_entry("synthetic")
+            self.assertEqual(db.get_history_page(search_query="SYNTHETIC"),
+                             db.search_history_page(search_query="SYNTHETIC"))
+        finally:
+            db.close()
+
     def test_history_page_returns_consistent_total_and_pinned_pagination(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(os.path.join(temp_dir, "history.db"))
@@ -161,34 +240,52 @@ class DatabaseTests(unittest.TestCase):
             finally:
                 db.close()
 
-    def test_compaction_requires_both_absolute_and_relative_free_space(self):
-        page_size = 4096
-        minimum_free_pages = VACUUM_MIN_FREE_BYTES // page_size
-        for free_pages, total_pages, expected in (
-            (minimum_free_pages - 1, minimum_free_pages, False),
-            (minimum_free_pages, minimum_free_pages * 4 + 1, False),
-            (minimum_free_pages, minimum_free_pages * 4, True),
-            (minimum_free_pages, minimum_free_pages, True),
-        ):
-            with self.subTest(free=free_pages, total=total_pages):
-                db = Database.__new__(Database)
-                db.conn = mock.Mock()
-                values = {
-                    "PRAGMA freelist_count": free_pages,
-                    "PRAGMA page_size": page_size,
-                    "PRAGMA page_count": total_pages,
-                }
-                db.conn.execute.side_effect = lambda sql: mock.Mock(fetchone=lambda: (values[sql],))
-                self.assertEqual(expected, db._vacuum_worthwhile_unlocked())
+    def test_retention_days_rejects_invalid_values_before_opening_database(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "history.db")
+            for value in (None, True, False, 0, -1, 1.5, "7", MAX_RETENTION_DAYS + 1):
+                with self.subTest(value=value), self.assertRaises(ValueError):
+                    Database(path, retention_days=value)
+                self.assertFalse(os.path.exists(path))
+            for value in (1, MAX_RETENTION_DAYS):
+                with self.subTest(value=value):
+                    db = Database(path, retention_days=value)
+                    self.assertEqual(value, db.retention_days)
+                    db.close()
 
-    def test_failed_expiration_restores_maintenance_state_and_rolls_back_deletions(self):
+    def test_configured_retention_expires_only_unpinned_on_startup_and_hourly_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "history.db")
+            db = Database(path)
+            try:
+                now = time.time()
+                with db.conn:
+                    insert_text_entry(db, "old unpinned", timestamp=now - 8 * 86400)
+                    insert_text_entry(db, "old pinned", pinned=1, timestamp=now - 8 * 86400)
+                    insert_text_entry(db, "recent unpinned", timestamp=now - 2 * 86400)
+            finally:
+                db.close()
+
+            db = Database(path, retention_days=7)
+            try:
+                self.assertEqual({"old pinned", "recent unpinned"},
+                                 {entry["preview"] for entry in db.get_history()})
+                with db.conn:
+                    insert_text_entry(db, "hourly old", timestamp=time.time() - 8 * 86400)
+                db._last_expire_time = 0
+                self.assertTrue(db.add_entry("trigger cleanup"))
+                self.assertEqual({"old pinned", "recent unpinned", "trigger cleanup"},
+                                 {entry["preview"] for entry in db.get_history()})
+            finally:
+                db.close()
+
+    def test_failed_expiration_restores_timing_state_and_rolls_back_deletions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(os.path.join(temp_dir, "history.db"))
             try:
                 with db.conn:
                     insert_text_entry(db, "expired fixture", timestamp=time.time() - 31 * 86400)
                 db._last_expire_time = 0
-                db._needs_vacuum = False
                 expire = db._maybe_expire
 
                 def expire_then_fail():
@@ -200,7 +297,6 @@ class DatabaseTests(unittest.TestCase):
                         db.add_entry("new fixture")
 
                 self.assertEqual(0, db._last_expire_time)
-                self.assertFalse(db._needs_vacuum)
                 self.assertEqual(["expired fixture"], [row["preview"] for row in db.get_history()])
             finally:
                 db.close()
@@ -274,20 +370,138 @@ class DatabaseTests(unittest.TestCase):
             finally:
                 db.close()
 
-    def test_tiny_deletion_does_not_rewrite_database_for_compaction(self):
+    def test_deletions_leave_reusable_free_pages_without_automatic_vacuum(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(os.path.join(temp_dir, "history.db"))
             try:
                 db.add_entry("", "image", image_data=b"x" * 1024 * 1024)
-                db._last_vacuum_time = 0
                 statements = []
                 db.conn.set_trace_callback(statements.append)
                 db.delete_entry(db.get_history()[0]["id"])
                 db.conn.set_trace_callback(None)
-                self.assertNotIn("VACUUM", statements)
+                self.assertFalse(any("VACUUM" in statement.upper() for statement in statements))
                 self.assertGreater(db.conn.execute("PRAGMA freelist_count").fetchone()[0], 0)
             finally:
                 db.close()
+
+    def test_bulk_clear_keeps_reads_and_new_image_writes_available_without_vacuum(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "history.db")
+            db = Database(path)
+            try:
+                for index in range(6):
+                    self.assertTrue(db.add_entry("", "image", image_data=bytes([index]) + b"x" * (2 * 1024 * 1024)))
+                statements = []
+                db.conn.set_trace_callback(statements.append)
+                self.assertEqual(6, db.clear_all())
+                free_before = db.conn.execute("PRAGMA freelist_count").fetchone()[0]
+                self.assertGreater(free_before, 0)
+
+                barrier = threading.Barrier(3)
+                results = {}
+                errors = []
+
+                def read_page():
+                    try:
+                        barrier.wait(timeout=5)
+                        results["page"] = db.get_history_page(limit=10)
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                def write_image():
+                    try:
+                        barrier.wait(timeout=5)
+                        results["write"] = db.add_entry("", "image", image_data=b"new" + b"y" * (2 * 1024 * 1024))
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                threads = [threading.Thread(target=read_page), threading.Thread(target=write_image)]
+                for thread in threads:
+                    thread.start()
+                barrier.wait(timeout=5)
+                for thread in threads:
+                    thread.join(timeout=10)
+                    self.assertFalse(thread.is_alive())
+                db.conn.set_trace_callback(None)
+                self.assertFalse(errors)
+                self.assertTrue(results["write"])
+                self.assertIn(results["page"][1], (0, 1))
+                self.assertEqual(1, db.get_history_count())
+                self.assertLess(db.conn.execute("PRAGMA freelist_count").fetchone()[0], free_before)
+                self.assertFalse(any("VACUUM" in statement.upper() for statement in statements))
+            finally:
+                db.close()
+
+            reopened = Database(path)
+            try:
+                self.assertEqual(1, reopened.get_history_count())
+            finally:
+                reopened.close()
+
+    def test_close_waits_for_inflight_image_write_and_read(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "history.db")
+            db = Database(path)
+            in_transaction = threading.Event()
+            resume = threading.Event()
+            close_started = threading.Event()
+            close_finished = threading.Event()
+            errors = []
+            results = {}
+            original_cleanup = db._cleanup_unlocked
+
+            def held_cleanup():
+                in_transaction.set()
+                if not resume.wait(5):
+                    raise TimeoutError("synthetic writer did not resume")
+                original_cleanup()
+
+            def write_image():
+                try:
+                    results["write"] = db.add_entry("", "image", image_data=b"synthetic image")
+                except BaseException as exc:
+                    errors.append(exc)
+
+            def read_page():
+                try:
+                    results["page"] = db.get_history_page()
+                except BaseException as exc:
+                    errors.append(exc)
+
+            def close_db():
+                close_started.set()
+                try:
+                    db.close()
+                except BaseException as exc:
+                    errors.append(exc)
+                finally:
+                    close_finished.set()
+
+            with mock.patch.object(db, "_cleanup_unlocked", side_effect=held_cleanup):
+                writer = threading.Thread(target=write_image)
+                reader = threading.Thread(target=read_page)
+                closer = threading.Thread(target=close_db)
+                try:
+                    writer.start()
+                    self.assertTrue(in_transaction.wait(5))
+                    reader.start()
+                    closer.start()
+                    self.assertTrue(close_started.wait(5))
+                    self.assertFalse(close_finished.wait(0.05))
+                finally:
+                    resume.set()
+                    for thread in (writer, reader, closer):
+                        if thread.ident is not None:
+                            thread.join(timeout=10)
+                            self.assertFalse(thread.is_alive())
+            self.assertFalse(errors)
+            self.assertTrue(results["write"])
+            self.assertIn(results["page"][1], (0, 1))
+            reopened = Database(path)
+            try:
+                self.assertEqual(1, reopened.get_history_count())
+            finally:
+                reopened.close()
 
     def test_operational_open_failure_does_not_quarantine_valid_database(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -383,6 +597,56 @@ class DatabaseTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_file_paths_are_text_payloads_with_separate_dedup_and_search(self):
+        paths = "C:\\Synthetic\\alpha.txt\nC:\\Synthetic\\beta.txt"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                self.assertTrue(db.add_entry(paths, "text"))
+                self.assertTrue(db.add_entry(paths, "file_paths"))
+                self.assertFalse(db.add_entry(paths, "file_paths"))
+                self.assertTrue(db.add_entry(paths, "text"))
+                self.assertFalse(db.add_entry(paths, "text"))
+                history = db.get_history(limit=10)
+                self.assertEqual(["text", "file_paths", "text"],
+                                 [entry["content_type"] for entry in history])
+                self.assertEqual(3, db.get_history_count("beta.txt"))
+                stored = db.get_entry(history[1]["id"])
+                self.assertEqual(paths, stored["content"])
+                self.assertEqual(Database._text_hash(paths), stored["content_hash"])
+                self.assertIsNone(stored["image_data"])
+            finally:
+                db.close()
+
+    def test_file_paths_truncation_uses_text_metadata_and_stored_prefix(self):
+        content = "C:\\Synthetic\\" + "a" * MAX_CONTENT_LENGTH
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                self.assertTrue(db.add_entry(content, "file_paths"))
+                row = db.get_history()[0]
+                self.assertEqual("file_paths", row["content_type"])
+                self.assertEqual(len(content), row["content_len"])
+                self.assertEqual(1, row["truncated"])
+                stored = db.get_entry(row["id"])
+                self.assertEqual(content[:MAX_CONTENT_LENGTH], stored["content"])
+                self.assertEqual(len(content), stored["original_content_len"])
+                self.assertEqual(Database._text_hash(content), stored["content_hash"])
+                self.assertEqual(1, db.get_history_count("Synthetic"))
+            finally:
+                db.close()
+
+    def test_unsupported_content_types_cannot_create_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                for kind in (None, "files", "unknown", 1):
+                    with self.subTest(kind=kind), self.assertRaises(ValueError):
+                        db.add_entry("C:\\Synthetic\\alpha.txt", kind)
+                self.assertEqual(0, db.get_history_count())
+            finally:
+                db.close()
+
     def test_long_text_uses_original_hash_for_dedup_and_exposes_truncation(self):
         prefix = "a" * MAX_CONTENT_LENGTH
         first = prefix + "x"
@@ -407,33 +671,7 @@ class DatabaseTests(unittest.TestCase):
             finally:
                 db.close()
 
-    def test_failed_vacuum_keeps_retry_flag_and_success_clears_it(self):
-        class FakeConn:
-            def __init__(self, fail):
-                self.fail = fail
-
-            def execute(self, _sql):
-                if self.fail:
-                    raise sqlite3.DatabaseError("busy")
-
-        db = Database.__new__(Database)
-        db.lock = threading.Lock()
-        db._closed = False
-        db._needs_vacuum = True
-        db._last_vacuum_time = time.time() - 90000
-        db.conn = FakeConn(fail=True)
-
-        with mock.patch.object(db, "_vacuum_worthwhile_unlocked", return_value=True):
-            Database._maybe_vacuum(db)
-        self.assertTrue(db._needs_vacuum)
-
-        db.conn = FakeConn(fail=False)
-        db._last_vacuum_time = time.time() - 90000
-        with mock.patch.object(db, "_vacuum_worthwhile_unlocked", return_value=True):
-            Database._maybe_vacuum(db)
-        self.assertFalse(db._needs_vacuum)
-
-    def test_hourly_expiration_sets_vacuum_flag_when_rows_are_deleted(self):
+    def test_hourly_expiration_deletes_unpinned_but_keeps_pinned(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(os.path.join(temp_dir, "history.db"))
             try:
@@ -449,7 +687,6 @@ class DatabaseTests(unittest.TestCase):
                     (old_timestamp,)
                 )
                 db.conn.commit()
-                db._needs_vacuum = False
                 db._last_expire_time = time.time() - 3700
 
                 with db.lock:
@@ -457,7 +694,6 @@ class DatabaseTests(unittest.TestCase):
 
                 history = db.get_history(limit=10)
                 self.assertEqual(["old pinned"], [entry["preview"] for entry in history])
-                self.assertTrue(db._needs_vacuum)
             finally:
                 db.close()
 
@@ -546,7 +782,6 @@ class DatabaseTests(unittest.TestCase):
                 history = db.get_history(limit=10)
                 self.assertEqual(2, deleted)
                 self.assertEqual(["pinned"], [entry["preview"] for entry in history])
-                self.assertTrue(db._needs_vacuum)
             finally:
                 db.close()
 
@@ -563,20 +798,15 @@ class DatabaseTests(unittest.TestCase):
 
                 self.assertEqual(2, deleted)
                 self.assertEqual([], db.get_history(limit=10))
-                self.assertTrue(db._needs_vacuum)
             finally:
                 db.close()
 
-    def test_noop_clear_returns_zero_and_does_not_request_vacuum(self):
+    def test_noop_clear_returns_zero(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(os.path.join(temp_dir, "history.db"))
             try:
-                db._needs_vacuum = False
-
                 self.assertEqual(0, db.clear_unpinned())
-                self.assertFalse(db._needs_vacuum)
                 self.assertEqual(0, db.clear_all())
-                self.assertFalse(db._needs_vacuum)
             finally:
                 db.close()
 

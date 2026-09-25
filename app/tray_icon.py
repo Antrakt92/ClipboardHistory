@@ -75,6 +75,14 @@ class TrayIcon:
     def _has_status_message(self, _item=None):
         return bool(self._status_snapshot) or self._recording_paused
 
+    def notify(self, message):
+        if not self.icon:
+            return
+        try:
+            self.icon.notify(message, "Clipboard History")
+        except (NotImplementedError, RuntimeError, OSError):
+            log.warning("Tray notification unavailable", exc_info=True)
+
     def start(self):
         if not os.path.exists(ICON_PATH):
             try:

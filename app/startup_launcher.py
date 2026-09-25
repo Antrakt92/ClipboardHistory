@@ -17,6 +17,22 @@ def _sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def launcher_is_current(target=None, inputs=None):
+    """Check the published launcher without building or changing autostart."""
+    target = Path(target) if target is not None else launcher_path()
+    stamp = target.with_suffix(".json")
+    try:
+        if inputs is None:
+            inputs = {
+                "source": _sha256(Path(APP_DIR) / "app" / "assets" / "ClipboardHistoryLauncher.cs"),
+                "icon": _sha256(ICO_PATH),
+            }
+        saved = json.loads(stamp.read_text(encoding="utf-8"))
+        return saved == dict(inputs, executable=_sha256(target))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def ensure_launcher():
     """Publish only a complete build; compilation failure preserves the old entry."""
     source = Path(APP_DIR) / "app" / "assets" / "ClipboardHistoryLauncher.cs"
@@ -24,12 +40,8 @@ def ensure_launcher():
     target = launcher_path()
     stamp = target.with_suffix(".json")
     inputs = {"source": _sha256(source), "icon": _sha256(icon)}
-    try:
-        saved = json.loads(stamp.read_text(encoding="utf-8"))
-        if saved == dict(inputs, executable=_sha256(target)):
-            return str(target)
-    except (OSError, ValueError):
-        pass
+    if launcher_is_current(target, inputs):
+        return str(target)
     windows = Path(os.environ.get("SystemRoot", r"C:\Windows"))
     compilers = [windows / "Microsoft.NET" / framework / "v4.0.30319" / "csc.exe"
                  for framework in ("Framework64", "Framework")]

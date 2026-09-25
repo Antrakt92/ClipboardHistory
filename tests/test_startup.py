@@ -118,7 +118,10 @@ class ApplicationStartupTests(unittest.TestCase):
             app.show_popup(123)
             app.show_popup(456)
 
-        popup_factory.assert_called_once_with(app.root, app.db, app.paste_engine, app.monitor)
+        popup_factory.assert_called_once_with(
+            app.root, app.db, app.paste_engine, app.monitor,
+            on_notice=app._notify_paste_status,
+        )
         self.assertEqual([mock.call(123), mock.call(456)], app.popup.show.call_args_list)
         app._refresh_status_ui.assert_called_once_with()
 
@@ -128,6 +131,9 @@ class ApplicationStartupTests(unittest.TestCase):
             "ensure_data_dir", "configure_logging", "migrate_legacy_db", "create_icon",
             "Database", "ClipboardMonitor", "HotkeyManager", "TrayIcon",
         )}
+        replacements["load_privacy_settings"] = mock.Mock(return_value={
+            "retention_days": 7, "excluded_processes": ("synthetic.exe",),
+        })
         with (
             mock.patch.dict(self.namespace, replacements),
             mock.patch("tkinter.Tk", return_value=root),
@@ -141,6 +147,30 @@ class ApplicationStartupTests(unittest.TestCase):
         self.assertIsNone(app.popup)
         popup_factory.assert_not_called()
         root.after.assert_not_called()
+        replacements["Database"].assert_called_once_with(
+            self.namespace["DB_PATH"], retention_days=7,
+        )
+        self.assertEqual(
+            ("synthetic.exe",),
+            replacements["ClipboardMonitor"].call_args.kwargs["excluded_processes"],
+        )
+
+    def test_invalid_privacy_settings_stop_before_monitor_starts(self):
+        root = mock.Mock()
+        monitor = mock.Mock()
+        with (
+            mock.patch.dict(self.namespace, {
+                "ensure_data_dir": mock.Mock(),
+                "configure_logging": mock.Mock(),
+                "migrate_legacy_db": mock.Mock(),
+                "load_privacy_settings": mock.Mock(side_effect=ValueError("invalid privacy settings")),
+                "ClipboardMonitor": monitor,
+            }),
+            mock.patch("tkinter.Tk", return_value=root),
+        ):
+            with self.assertRaisesRegex(ValueError, "invalid privacy settings"):
+                self.app_class()
+        monitor.assert_not_called()
 
 
 if __name__ == "__main__":

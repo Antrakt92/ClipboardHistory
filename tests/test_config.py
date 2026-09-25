@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import os
 import tempfile
 import unittest
@@ -6,7 +7,7 @@ from pathlib import Path
 from unittest import mock
 from contextlib import closing
 
-from app.config import migrate_legacy_db
+from app.config import migrate_legacy_db, load_privacy_settings
 
 
 def make_legacy_database(path):
@@ -46,6 +47,7 @@ class LegacyMigrationTests(unittest.TestCase):
                 self.assertEqual([], list(destination.parent.iterdir()))
             finally:
                 conn.close()
+
 
     def test_migration_includes_committed_wal_and_preserves_source(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -139,6 +141,42 @@ class LegacyMigrationTests(unittest.TestCase):
                 self.assertEqual("synthetic WAL record", conn.execute("SELECT value FROM fixture").fetchone()[0])
             finally:
                 conn.close()
+
+
+class PrivacySettingsTests(unittest.TestCase):
+    def test_missing_settings_preserve_existing_defaults(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = load_privacy_settings(Path(directory) / "missing.json")
+        self.assertEqual(30, settings["retention_days"])
+        self.assertEqual((), settings["excluded_processes"])
+
+    def test_settings_normalize_explicit_exclusions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "privacy.json"
+            path.write_text(json.dumps({"retention_days": 7, "excluded_processes": ["PrivateApp.exe", "editor.exe"]}))
+            settings = load_privacy_settings(path)
+        self.assertEqual(7, settings["retention_days"])
+        self.assertEqual(("privateapp.exe", "editor.exe"), settings["excluded_processes"])
+
+    def test_invalid_settings_fail_closed(self):
+        bad_values = [
+            {"retention_days": True},
+            {"retention_days": 0},
+            {"retention_days": 366},
+            {"excluded_processes": ["..\\private.exe"]},
+            {"excluded_processes": "private.exe"},
+            {"unknown_key": True},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "privacy.json"
+            for value in bad_values:
+                with self.subTest(value=value):
+                    path.write_text(json.dumps(value), encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        load_privacy_settings(path)
+            path.write_text("{bad json", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_privacy_settings(path)
 
 
 if __name__ == "__main__":

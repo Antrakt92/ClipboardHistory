@@ -1,3 +1,4 @@
+import ctypes
 import io
 import struct
 import threading
@@ -35,6 +36,68 @@ def make_dib_header(width, height):
 
 
 class ClipboardMonitorImageTests(unittest.TestCase):
+    def test_file_drop_is_tagged_as_text_paths_for_clear_popup_label(self):
+        callback = mock.Mock()
+        monitor = ClipboardMonitor(callback)
+        with (
+            mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
+            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"),
+            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt == 15),
+            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value=(r"C:\synthetic\one.txt", r"C:\synthetic\two.txt")),
+        ):
+            self.assertEqual(CLIPBOARD_READ_OK, monitor._read_clipboard_once())
+        callback.assert_called_once_with("C:\\synthetic\\one.txt\nC:\\synthetic\\two.txt", "file_paths")
+
+    def test_owner_process_name_uses_exact_executable_basename(self):
+        def process_id(_owner, output):
+            ctypes.cast(output, ctypes.POINTER(ctypes.wintypes.DWORD)).contents.value = 123
+            return 1
+
+        def process_path(_handle, _flags, output, _length):
+            output.value = r"C:\Private Folder\PRIVATEAPP.EXE"
+            return 1
+
+        with (
+            mock.patch.object(clipboard_monitor.user32, "GetClipboardOwner", return_value=99),
+            mock.patch.object(clipboard_monitor.user32, "GetWindowThreadProcessId", side_effect=process_id),
+            mock.patch.object(clipboard_monitor.kernel32, "OpenProcess", return_value=456),
+            mock.patch.object(clipboard_monitor.kernel32, "QueryFullProcessImageNameW", side_effect=process_path),
+            mock.patch.object(clipboard_monitor.kernel32, "CloseHandle") as close_handle,
+        ):
+            self.assertEqual("privateapp.exe", clipboard_monitor._clipboard_owner_process_name())
+        close_handle.assert_called_once_with(456)
+
+    def test_process_exclusion_skips_content_before_read_and_unknown_owner_fails_closed(self):
+        text_format = clipboard_monitor.win32clipboard.CF_UNICODETEXT
+        for owner_name in ("privateapp.exe", None):
+            with self.subTest(owner_name=owner_name):
+                callback = mock.Mock()
+                monitor = ClipboardMonitor(callback, excluded_processes=("privateapp.exe",))
+                with (
+                    mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
+                    mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard") as close,
+                    mock.patch.object(clipboard_monitor, "_clipboard_owner_process_name", return_value=owner_name),
+                    mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", return_value=True),
+                    mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData") as get_data,
+                ):
+                    self.assertEqual(CLIPBOARD_READ_OK, monitor._read_clipboard_once())
+                callback.assert_not_called()
+                get_data.assert_not_called()
+                close.assert_called_once_with()
+
+    def test_known_allowed_process_is_captured_with_exclusion_policy(self):
+        callback = mock.Mock()
+        monitor = ClipboardMonitor(callback, excluded_processes=("privateapp.exe",))
+        with (
+            mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
+            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"),
+            mock.patch.object(clipboard_monitor, "_clipboard_owner_process_name", return_value="editor.exe"),
+            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt == clipboard_monitor.win32clipboard.CF_UNICODETEXT),
+            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value="synthetic allowed content"),
+        ):
+            self.assertEqual(CLIPBOARD_READ_OK, monitor._read_clipboard_once())
+        callback.assert_called_once_with("synthetic allowed content", "text")
+
     def test_clipboard_history_privacy_markers_skip_content(self):
         for name, payload in (
             ("ExcludeClipboardContentFromMonitorProcessing", b""),

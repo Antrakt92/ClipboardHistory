@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 import sqlite3
 import tempfile
@@ -15,6 +16,7 @@ APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DATA_DIR = os.path.join(os.environ.get("APPDATA", APP_DIR), APP_NAME)
 DB_PATH = os.path.join(_DATA_DIR, "clipboard_history.db")
 LOG_PATH = os.path.join(_DATA_DIR, "clipboard_history.log")
+PRIVACY_SETTINGS_PATH = os.path.join(_DATA_DIR, "privacy.json")
 
 # Migrate old DB from project root if it exists and new location is empty
 _OLD_DB = os.path.join(APP_DIR, "clipboard_history.db")
@@ -22,6 +24,35 @@ _OLD_DB = os.path.join(APP_DIR, "clipboard_history.db")
 
 def ensure_data_dir(data_dir=_DATA_DIR):
     os.makedirs(data_dir, exist_ok=True)
+
+
+def load_privacy_settings(path=None):
+    """Read optional privacy policy; reject malformed policy before capture starts."""
+    path = PRIVACY_SETTINGS_PATH if path is None else path
+    try:
+        with open(path, "r", encoding="utf-8") as source:
+            value = json.load(source)
+    except FileNotFoundError:
+        return {"retention_days": 30, "excluded_processes": ()}
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("Invalid privacy settings JSON") from exc
+    if not isinstance(value, dict) or set(value) - {"retention_days", "excluded_processes"}:
+        raise ValueError("Invalid privacy settings keys")
+    days = value.get("retention_days", 30)
+    if type(days) is not int or not 1 <= days <= 365:
+        raise ValueError("retention_days must be an integer from 1 to 365")
+    raw_exclusions = value.get("excluded_processes", [])
+    if not isinstance(raw_exclusions, list) or len(raw_exclusions) > 64:
+        raise ValueError("excluded_processes must be a list of at most 64 executable names")
+    exclusions = []
+    for raw_name in raw_exclusions:
+        if (not isinstance(raw_name, str) or not raw_name or raw_name != raw_name.strip()
+                or any(char in raw_name for char in "/\\:") or not raw_name.casefold().endswith(".exe")):
+            raise ValueError("excluded_processes entries must be executable names ending in .exe")
+        name = raw_name.casefold()
+        if name not in exclusions:
+            exclusions.append(name)
+    return {"retention_days": days, "excluded_processes": tuple(exclusions)}
 
 
 def migrate_legacy_db(old_db=_OLD_DB, db_path=DB_PATH):

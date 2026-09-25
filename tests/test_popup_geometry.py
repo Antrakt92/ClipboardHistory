@@ -1,4 +1,5 @@
 import unittest
+import threading
 from unittest import mock
 
 import customtkinter
@@ -82,6 +83,11 @@ class PopupGeometryTests(unittest.TestCase):
         popup._preview_window = None
         popup._focus_check_id = None
         popup._search_after_id = None
+        popup._search_poll_after_id = None
+        popup._search_generation = 0
+        popup._search_pending = False
+        popup._search_job = None
+        popup._search_lock = threading.Lock()
         popup.focus_get.return_value = None
         popup._get_tk_hwnd.return_value = 123
         popup.after.return_value = "focus-retry"

@@ -7,7 +7,7 @@ import sys
 import winreg
 
 from app.config import AUTOSTART_KEY, AUTOSTART_NAME, SCRIPT_PATH
-from app.startup_launcher import ensure_launcher, launcher_path
+from app.startup_launcher import ensure_launcher, launcher_is_current, launcher_path
 
 log = logging.getLogger(__name__)
 
@@ -80,7 +80,12 @@ def is_autostart_enabled():
             command, value_type = winreg.QueryValueEx(key, AUTOSTART_NAME)
             if value_type not in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
                 return False
-            return _is_expected_autostart_command(command)
+            if not _is_expected_autostart_command(command):
+                return False
+            parts = _split_command_line(command)
+            if len(parts) == 3:
+                return launcher_is_current(launcher_path())
+            return True
     except (FileNotFoundError, OSError):
         return False
 

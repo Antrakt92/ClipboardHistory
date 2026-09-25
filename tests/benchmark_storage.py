@@ -58,6 +58,16 @@ def compaction_sample(database_class, path, delete_count):
         free_pages = db.conn.execute("PRAGMA freelist_count").fetchone()[0]
         total_pages = db.conn.execute("PRAGMA page_count").fetchone()[0]
         page_size = db.conn.execute("PRAGMA page_size").fetchone()[0]
+        if not hasattr(db, "_maybe_vacuum"):
+            # Current policy reuses free pages and never compacts on an app path.
+            _, history_ms = timed(db.get_history)
+            return {
+                "compaction_ms": 0.0,
+                "concurrent_history_ms": history_ms,
+                "vacuum_executed": False,
+                "free_mib": free_pages * page_size / 1024 / 1024,
+                "free_fraction": free_pages / total_pages if total_pages else 0,
+            }
         started = threading.Event()
         finished = threading.Event()
         statements = []

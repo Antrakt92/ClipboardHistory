@@ -2,6 +2,7 @@ import ctypes
 import ctypes.wintypes
 import io
 import logging
+import ntpath
 import struct
 import threading
 import time as _time
@@ -23,6 +24,7 @@ INCLUDE_HISTORY_FORMAT = win32clipboard.RegisterClipboardFormat("CanIncludeInCli
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 # Fix DefWindowProcW argument/return types to handle large lparam values
 user32.DefWindowProcW.argtypes = [
@@ -35,6 +37,16 @@ user32.AddClipboardFormatListener.argtypes = [ctypes.wintypes.HWND]
 user32.AddClipboardFormatListener.restype = ctypes.wintypes.BOOL
 user32.RemoveClipboardFormatListener.argtypes = [ctypes.wintypes.HWND]
 user32.RemoveClipboardFormatListener.restype = ctypes.wintypes.BOOL
+user32.GetClipboardOwner.restype = ctypes.wintypes.HWND
+user32.GetWindowThreadProcessId.argtypes = [ctypes.wintypes.HWND, ctypes.POINTER(ctypes.wintypes.DWORD)]
+user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
+kernel32.OpenProcess.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.DWORD]
+kernel32.OpenProcess.restype = ctypes.wintypes.HANDLE
+kernel32.QueryFullProcessImageNameW.argtypes = [ctypes.wintypes.HANDLE, ctypes.wintypes.DWORD,
+                                               ctypes.wintypes.LPWSTR, ctypes.POINTER(ctypes.wintypes.DWORD)]
+kernel32.QueryFullProcessImageNameW.restype = ctypes.wintypes.BOOL
+kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+kernel32.CloseHandle.restype = ctypes.wintypes.BOOL
 
 # Fix restype for functions returning pointer-sized values (default c_int truncates on x64)
 kernel32.GetModuleHandleW.argtypes = [ctypes.wintypes.LPCWSTR]
@@ -73,6 +85,27 @@ WNDPROC = ctypes.WINFUNCTYPE(
 )
 
 
+def _clipboard_owner_process_name():
+    """Return an exact executable basename, or None when provenance is unknown."""
+    owner = user32.GetClipboardOwner()
+    if not owner:
+        return None
+    pid = ctypes.wintypes.DWORD()
+    if not user32.GetWindowThreadProcessId(owner, ctypes.byref(pid)) or not pid.value:
+        return None
+    process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+    if not process:
+        return None
+    try:
+        path = ctypes.create_unicode_buffer(32768)
+        length = ctypes.wintypes.DWORD(len(path))
+        if not kernel32.QueryFullProcessImageNameW(process, 0, path, ctypes.byref(length)):
+            return None
+        return ntpath.basename(path.value).casefold() or None
+    finally:
+        kernel32.CloseHandle(process)
+
+
 class WNDCLASS(ctypes.Structure):
     _fields_ = [
         ("style", ctypes.c_uint),
@@ -89,10 +122,12 @@ class WNDCLASS(ctypes.Structure):
 
 
 class ClipboardMonitor:
-    def __init__(self, on_new_content, on_status=None, timer_factory=None, should_record=None):
+    def __init__(self, on_new_content, on_status=None, timer_factory=None, should_record=None,
+                 excluded_processes=()):
         self.on_new_content = on_new_content
         self.on_status = on_status
         self._should_record = should_record or (lambda: True)
+        self._excluded_processes = frozenset(name.casefold() for name in excluded_processes)
         self._running = threading.Event()
         self._running.set()
         self._ignore_lock = threading.Lock()
@@ -254,6 +289,11 @@ class ClipboardMonitor:
             try:
                 if not self._allows_history_capture():
                     return CLIPBOARD_READ_OK
+                if self._excluded_processes:
+                    # Fail closed when the clipboard owner cannot be identified.
+                    owner_name = _clipboard_owner_process_name()
+                    if owner_name is None or owner_name in self._excluded_processes:
+                        return CLIPBOARD_READ_OK
                 # Prefer text if available
                 if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_UNICODETEXT):
                     content = win32clipboard.GetClipboardData(win32clipboard.CF_UNICODETEXT)
@@ -290,7 +330,7 @@ class ClipboardMonitor:
                 # file_list is a tuple of file paths from CF_HDROP
                 paths_text = "\n".join(file_list)
                 if paths_text.strip():
-                    captured = (paths_text, "text")
+                    captured = (paths_text, "file_paths")
             elif raw_dib:
                 png_bytes = self._process_dib_image(raw_dib)
                 if png_bytes:

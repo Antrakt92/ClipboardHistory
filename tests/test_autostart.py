@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+import tempfile
 import unittest
 from unittest import mock
 
@@ -82,6 +84,18 @@ class AutostartTests(unittest.TestCase):
             mock.patch.object(autostart, "SCRIPT_PATH", expected_script),
         ):
             self.assertTrue(autostart.is_autostart_enabled())
+
+    def test_missing_or_changed_branded_launcher_is_not_reported_enabled(self):
+        key = FakeKey()
+        with tempfile.TemporaryDirectory() as directory:
+            launcher = Path(directory) / "ClipboardHistory.exe"
+            command = autostart._build_autostart_command(launcher=str(launcher))
+            with (
+                mock.patch.object(autostart.winreg, "OpenKey", return_value=key),
+                mock.patch.object(autostart.winreg, "QueryValueEx", return_value=(command, autostart.winreg.REG_SZ)),
+                mock.patch.object(autostart, "launcher_path", return_value=launcher),
+            ):
+                self.assertFalse(autostart.is_autostart_enabled())
 
     def test_is_autostart_enabled_rejects_missing_stale_error_and_non_string_values(self):
         key = FakeKey()

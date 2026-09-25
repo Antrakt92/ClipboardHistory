@@ -245,6 +245,22 @@ class PasteEngineTests(unittest.TestCase):
                 if not readable or size > 100_000:
                     read.assert_not_called()
 
+    def test_readback_retries_a_transient_busy_clipboard(self):
+        with (
+            mock.patch.object(paste_engine.win32clipboard, "OpenClipboard", side_effect=[RuntimeError("busy"), None]),
+            mock.patch.object(paste_engine.time, "sleep") as sleep,
+            mock.patch.object(paste_engine.win32clipboard, "IsClipboardFormatAvailable", return_value=True),
+            mock.patch.object(paste_engine.win32clipboard, "GetClipboardDataHandle", return_value=123),
+            mock.patch.object(paste_engine.kernel32, "GlobalSize", return_value=32),
+            mock.patch.object(paste_engine.win32clipboard, "GetClipboardData", return_value="fixture"),
+            mock.patch.object(paste_engine.user32, "GetClipboardSequenceNumber", return_value=77),
+            mock.patch.object(paste_engine.win32clipboard, "CloseClipboard") as close,
+        ):
+            sequence = PasteEngine._capture_written_sequence(paste_engine.win32clipboard.CF_UNICODETEXT, "fixture")
+        self.assertEqual(77, sequence)
+        sleep.assert_called_once_with(0.025)
+        close.assert_called_once()
+
     def test_unchanged_clipboard_sequence_allows_paste(self):
         fake_user32 = FakeUser32(send_count=4)
         fake_user32.GetClipboardSequenceNumber = mock.Mock(return_value=77)
@@ -273,6 +289,7 @@ class PasteEngineTests(unittest.TestCase):
         self.assertFalse(completion.success)
         self.assertEqual(0, completion.send_input_count)
         self.assertEqual(0, fake_user32.send_calls)
+        self.assertEqual("clipboard_changed", completion.reason)
 
     def test_clipboard_write_failure_clears_ignore_and_does_not_start_worker(self):
         threads = SyncThreadFactory()
@@ -305,6 +322,19 @@ class PasteEngineTests(unittest.TestCase):
         self.assertEqual(1, len(threads.created))
         self.assertTrue(threads.created[0].started)
         self.assertTrue(threads.created[0].daemon)
+
+    def test_file_paths_use_text_clipboard_write(self):
+        threads = SyncThreadFactory()
+        engine = StubPasteEngine(thread_factory=threads)
+        paths = "C:\\Synthetic\\one.txt\nC:\\Synthetic\\two.txt"
+        with (
+            mock.patch.object(engine, "_set_clipboard_text", return_value=paste_engine.ClipboardWriteResult(True, 77)) as write,
+            mock.patch.object(engine, "_set_clipboard_image") as image_write,
+        ):
+            result = engine.paste(paths, content_type="file_paths", target_hwnd=456)
+        self.assertTrue(result.started)
+        write.assert_called_once_with(paths)
+        image_write.assert_not_called()
 
     def test_focus_and_press_succeeds_when_send_input_sends_all_events(self):
         fake_user32 = FakeUser32(send_count=paste_engine.EXPECTED_INPUT_COUNT)
@@ -340,6 +370,7 @@ class PasteEngineTests(unittest.TestCase):
 
         self.assertFalse(completion.success)
         self.assertEqual(paste_engine.EXPECTED_INPUT_COUNT - 1, completion.send_input_count)
+        self.assertEqual("send_input_incomplete", completion.reason)
         self.assertEqual(87, completion.send_error)
         self.assertIn("SendInput sent", "\n".join(logs.output))
 
@@ -362,6 +393,7 @@ class PasteEngineTests(unittest.TestCase):
         self.assertFalse(completion.success)
         self.assertTrue(completion.focus_attempted)
         self.assertFalse(completion.focus_succeeded)
+        self.assertEqual("focus_denied", completion.reason)
         self.assertEqual(5, completion.focus_error)
         self.assertEqual(0, completion.send_input_count)
         self.assertEqual(0, fake_user32.send_calls)

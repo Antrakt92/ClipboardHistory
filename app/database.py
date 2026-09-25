@@ -5,22 +5,25 @@ import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 from app.config import DB_PATH, MAX_HISTORY_SIZE, MAX_CONTENT_LENGTH, MAX_IMAGE_BYTES, PREVIEW_LENGTH
 
 log = logging.getLogger(__name__)
 
-# Auto-delete unpinned entries older than this (days)
-AUTO_EXPIRE_DAYS = 30
-VACUUM_MIN_FREE_BYTES = 32 * 1024 * 1024
-VACUUM_MIN_FREE_RATIO = 0.25
+# Expiration applies only to unpinned entries. Keep the bound small enough that
+# a malformed setting cannot silently retain private history indefinitely.
+DEFAULT_RETENTION_DAYS = 30
+MAX_RETENTION_DAYS = 365
+# Keep deleted pages on SQLite's freelist for later writes. A live VACUUM can
+# block popup reads and new clipboard writes even on a separate WAL connection.
 # Columns after image_data traverse overflow pages; only text needs its trailing metadata.
 HISTORY_METADATA_COLUMNS = """history.id,
-    CASE WHEN history.content_type = 'text'
+    CASE WHEN history.content_type IN ('text', 'file_paths')
         THEN COALESCE(NULLIF(history.original_content_len, 0), LENGTH(history.content))
         ELSE LENGTH(history.content) END AS content_len,
     history.content_type, history.timestamp, history.pinned, history.preview,
-    CASE WHEN history.content_type = 'text' THEN history.truncated ELSE 0 END AS truncated"""
+    CASE WHEN history.content_type IN ('text', 'file_paths') THEN history.truncated ELSE 0 END AS truncated"""
 
 
 class _CorruptDatabase(sqlite3.DatabaseError):
@@ -28,13 +31,14 @@ class _CorruptDatabase(sqlite3.DatabaseError):
 
 
 class Database:
-    def __init__(self, db_path=None):
+    def __init__(self, db_path=None, retention_days=DEFAULT_RETENTION_DAYS):
+        if type(retention_days) is not int or not 1 <= retention_days <= MAX_RETENTION_DAYS:
+            raise ValueError(f"retention_days must be an integer from 1 to {MAX_RETENTION_DAYS}")
         self.db_path = db_path or DB_PATH
+        self.retention_days = retention_days
         self.lock = threading.Lock()
         self._closed = False
         self._last_expire_time = time.time()
-        self._last_vacuum_time = time.time()
-        self._needs_vacuum = False
         self.conn = self._open_or_recreate(self.db_path)
         self.conn.row_factory = sqlite3.Row
         # SQLite LIKE only folds ASCII; preserve literal Unicode search without
@@ -50,12 +54,12 @@ class Database:
     @contextmanager
     def _write_transaction_unlocked(self):
         """Commit a write and its retention changes together while self.lock is held."""
-        previous_maintenance = (self._last_expire_time, self._needs_vacuum)
+        previous_expire_time = self._last_expire_time
         try:
             with self.conn:
                 yield
         except BaseException:
-            self._last_expire_time, self._needs_vacuum = previous_maintenance
+            self._last_expire_time = previous_expire_time
             raise
 
     @staticmethod
@@ -75,8 +79,8 @@ class Database:
         }
 
     @staticmethod
-    def _is_duplicate_text(row, content_hash, stored_content):
-        if not row or row["content_type"] != "text":
+    def _is_duplicate_text(row, content_type, content_hash, stored_content):
+        if not row or row["content_type"] != content_type:
             return False
         if "content_hash" in row.keys() and row["content_hash"]:
             return row["content_hash"] == content_hash
@@ -199,7 +203,7 @@ class Database:
     def _backfill_text_metadata_unlocked(self):
         cursor = self.conn.execute(
             """SELECT id, content FROM clipboard_history
-               WHERE content_type = 'text'
+               WHERE content_type IN ('text', 'file_paths')
                AND (content_hash IS NULL OR original_content_len = 0)"""
         )
         rows = cursor.fetchall()
@@ -220,18 +224,18 @@ class Database:
             log.debug("WAL checkpoint skipped", exc_info=True)
 
     def _expire_old_entries(self):
-        """Delete unpinned entries older than AUTO_EXPIRE_DAYS."""
-        cutoff = time.time() - AUTO_EXPIRE_DAYS * 86400
+        """Delete unpinned entries older than the configured retention period."""
+        cutoff = time.time() - self.retention_days * 86400
         with self.lock:
-            cursor = self.conn.execute(
+            self.conn.execute(
                 "DELETE FROM clipboard_history WHERE pinned = 0 AND timestamp < ?",
                 (cutoff,)
             )
             self.conn.commit()
-            if cursor.rowcount > 0:
-                self._needs_vacuum = True
 
     def add_entry(self, content, content_type="text", image_data=None):
+        if content_type not in ("text", "file_paths", "image"):
+            raise ValueError("Unsupported clipboard content type")
         if self._closed:
             return False
         if content_type == "image":
@@ -251,7 +255,7 @@ class Database:
                    ORDER BY timestamp DESC LIMIT 1"""
             )
             row = cursor.fetchone()
-            if self._is_duplicate_text(row, record["content_hash"], record["content"]):
+            if self._is_duplicate_text(row, content_type, record["content_hash"], record["content"]):
                 return False
 
             with self._write_transaction_unlocked():
@@ -273,7 +277,6 @@ class Database:
                 self._cleanup_unlocked()
                 self._maybe_expire()
 
-        self._maybe_vacuum()
         return True
 
     def _add_image_entry(self, image_data):
@@ -311,7 +314,6 @@ class Database:
                 self._cleanup_unlocked()
                 self._maybe_expire()
 
-        self._maybe_vacuum()
         return True
 
     @staticmethod
@@ -350,33 +352,53 @@ class Database:
         with self.lock:
             if self._closed:
                 return [], 0
-            where_clause, params = self._history_search_filter(search_query)
-            # The windowed CTE evaluates Unicode matching once, retaining IDs and
-            # ordering fields only. The left join preserves total for an empty page.
-            rows = self.conn.execute(
-                f"""WITH matches AS (
-                        SELECT id, pinned, timestamp, COUNT(*) OVER () AS total
-                        FROM clipboard_history {where_clause}
-                    ), page AS (
-                        SELECT id FROM matches
-                        ORDER BY pinned DESC, timestamp DESC, id DESC
-                        LIMIT ? OFFSET ?
-                    )
-                    SELECT {HISTORY_METADATA_COLUMNS}, COALESCE(totals.total, 0) AS total
-                    FROM (SELECT MAX(total) AS total FROM matches) AS totals
-                    LEFT JOIN page ON 1
-                    LEFT JOIN clipboard_history AS history ON history.id = page.id
-                    ORDER BY history.pinned DESC, history.timestamp DESC, history.id DESC""",
-                (*params, limit, offset),
-            ).fetchall()
-            total = rows[0]["total"]
-            entries = []
-            for row in rows:
-                if row["id"] is not None:
-                    entry = dict(row)
-                    del entry["total"]
-                    entries.append(entry)
-            return entries, total
+            return self._query_history_page(self.conn, limit, offset, search_query)
+
+    def search_history_page(self, limit=50, offset=0, search_query=None):
+        """Search on an independent read-only WAL connection, away from the writer lock."""
+        if self.db_path == ":memory:":
+            return self.get_history_page(limit=limit, offset=offset, search_query=search_query)
+        if self._closed:
+            return [], 0
+        # Path.as_uri escapes spaces, percent signs and Unicode in Windows paths.
+        uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=3.0)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.create_function("unicode_contains", 2, self._unicode_contains)
+            return self._query_history_page(conn, limit, offset, search_query)
+        finally:
+            conn.close()
+
+    @classmethod
+    def _query_history_page(cls, conn, limit, offset, search_query):
+        where_clause, params = cls._history_search_filter(search_query)
+        # The windowed CTE evaluates Unicode matching once, retaining IDs and
+        # ordering fields only. The left join preserves total for an empty page.
+        rows = conn.execute(
+            f"""WITH matches AS (
+                    SELECT id, pinned, timestamp, COUNT(*) OVER () AS total
+                    FROM clipboard_history {where_clause}
+                ), page AS (
+                    SELECT id FROM matches
+                    ORDER BY pinned DESC, timestamp DESC, id DESC
+                    LIMIT ? OFFSET ?
+                )
+                SELECT {HISTORY_METADATA_COLUMNS}, COALESCE(totals.total, 0) AS total
+                FROM (SELECT MAX(total) AS total FROM matches) AS totals
+                LEFT JOIN page ON 1
+                LEFT JOIN clipboard_history AS history ON history.id = page.id
+                ORDER BY history.pinned DESC, history.timestamp DESC, history.id DESC""",
+            (*params, limit, offset),
+        ).fetchall()
+        total = rows[0]["total"]
+        entries = []
+        for row in rows:
+            if row["id"] is not None:
+                entry = dict(row)
+                del entry["total"]
+                entries.append(entry)
+        return entries, total
 
     def get_history_count(self, search_query=None):
         with self.lock:
@@ -417,8 +439,6 @@ class Database:
                 "DELETE FROM clipboard_history WHERE id = ?", (entry_id,)
             )
             self.conn.commit()
-            self._needs_vacuum = True
-        self._maybe_vacuum()
 
     def touch_entry(self, entry_id):
         with self.lock:
@@ -440,7 +460,6 @@ class Database:
                     (entry_id,)
                 )
                 self._cleanup_unlocked()
-        self._maybe_vacuum()
 
     def clear_unpinned(self):
         with self.lock:
@@ -451,9 +470,6 @@ class Database:
             )
             self.conn.commit()
             deleted = cursor.rowcount
-            if deleted > 0:
-                self._needs_vacuum = True
-        self._maybe_vacuum()
         return deleted
 
     def clear_all(self):
@@ -463,9 +479,6 @@ class Database:
             cursor = self.conn.execute("DELETE FROM clipboard_history")
             self.conn.commit()
             deleted = cursor.rowcount
-            if deleted > 0:
-                self._needs_vacuum = True
-        self._maybe_vacuum()
         return deleted
 
     def _cleanup_unlocked(self):
@@ -484,7 +497,6 @@ class Database:
                     LIMIT ?
                 )
             """, (to_delete,))
-            self._needs_vacuum = True
 
     def _maybe_expire(self):
         """Run expiration at most once per hour (called inside lock)."""
@@ -492,40 +504,11 @@ class Database:
         if now - self._last_expire_time < 3600:
             return
         self._last_expire_time = now
-        cutoff = now - AUTO_EXPIRE_DAYS * 86400
-        cursor = self.conn.execute(
+        cutoff = now - self.retention_days * 86400
+        self.conn.execute(
             "DELETE FROM clipboard_history WHERE pinned = 0 AND timestamp < ?",
             (cutoff,)
         )
-        if cursor.rowcount > 0:
-            self._needs_vacuum = True
-
-    def _maybe_vacuum(self):
-        """Compact substantial free space at most once per day; small gaps are reused."""
-        if not self._needs_vacuum:
-            return
-        now = time.time()
-        if now - self._last_vacuum_time < 86400:
-            return
-        with self.lock:
-            if self._closed or now - self._last_vacuum_time < 86400:
-                return
-            self._last_vacuum_time = now
-            try:
-                if not self._vacuum_worthwhile_unlocked():
-                    return
-                self.conn.execute("VACUUM")
-                self._needs_vacuum = False
-            except sqlite3.DatabaseError:
-                log.debug("VACUUM skipped", exc_info=True)
-
-    def _vacuum_worthwhile_unlocked(self):
-        free_pages = self.conn.execute("PRAGMA freelist_count").fetchone()[0]
-        page_size = self.conn.execute("PRAGMA page_size").fetchone()[0]
-        if free_pages * page_size < VACUUM_MIN_FREE_BYTES:
-            return False
-        total_pages = self.conn.execute("PRAGMA page_count").fetchone()[0]
-        return total_pages > 0 and free_pages / total_pages >= VACUUM_MIN_FREE_RATIO
 
     def close(self):
         with self.lock:

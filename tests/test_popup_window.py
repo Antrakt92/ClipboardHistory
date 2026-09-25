@@ -1,4 +1,5 @@
 import unittest
+import io
 import queue
 import threading
 from types import SimpleNamespace
@@ -701,6 +702,138 @@ class PopupSearchSafetyTests(unittest.TestCase):
         popup._paste_selected()
         popup._on_item_click.assert_called_once_with(1)
         popup._request_search.assert_not_called()
+
+
+class PopupPerfRobustnessTests(unittest.TestCase):
+    """show() must not block on DB reads; preview decodes off the UI thread."""
+
+    def test_poll_schedule_failure_does_not_raise(self):
+        popup = object.__new__(PopupWindow)
+        popup._visible = True
+        popup._search_generation = 0
+        popup._search_pending = False
+        popup._search_requested_query = "old"
+        popup._search_job = None
+        popup._search_worker_running = False
+        popup._search_lock = threading.Lock()
+        popup._search_results = queue.Queue()
+        popup._search_poll_after_id = None
+        popup._loaded_limit = HISTORY_PAGE_SIZE
+        popup.db = mock.Mock()
+        popup.db.search_history_page.return_value = ([], 0)
+        popup.after = mock.Mock(side_effect=RuntimeError("window closed"))
+
+        class NoThread:
+            def __init__(self, target, daemon):
+                self.target = target
+
+            def start(self):
+                pass
+
+        popup._search_thread_factory = NoThread
+        # Must not raise: destroy-at-quit hits the unguarded after() call.
+        popup._request_search("x", reset=True)
+        self.assertTrue(popup._search_pending)
+        self.assertIsNotNone(popup._search_job)
+
+    def test_show_fetches_first_page_async_without_sync_db_read(self):
+        popup = object.__new__(PopupWindow)
+        popup._visible = False
+        popup._prev_hwnd = None
+        popup._last_search_text = "stale"
+        popup._position_popup = mock.Mock()
+        popup.search_entry = mock.Mock()
+        popup._reset_clear_confirm = mock.Mock()
+        popup._show_loading_placeholder = mock.Mock()
+        popup._request_search = mock.Mock()
+        popup._canvas = mock.Mock()
+        popup.deiconify = mock.Mock()
+        popup.lift = mock.Mock()
+        popup.attributes = mock.Mock()
+        popup.after = mock.Mock()
+        popup.db = mock.Mock()
+        with mock.patch("app.popup_window._get_cursor_pos", return_value=(100, 100)):
+            PopupWindow.show(popup, prev_hwnd=55)
+        popup.db.get_history_page.assert_not_called()
+        popup.db.search_history_page.assert_not_called()
+        popup._request_search.assert_called_once_with(None, reset=True)
+        self.assertEqual(55, popup._prev_hwnd)
+        self.assertTrue(popup._visible)
+
+    def test_load_more_pending_refreshes_stale_search(self):
+        popup = object.__new__(PopupWindow)
+        popup._visible = True
+        popup._search_pending = True
+        popup._loaded_limit = HISTORY_PAGE_SIZE
+        popup._total_items = 100
+        popup._current_search_query = "q"
+        popup._ensure_current_search = mock.Mock(return_value=False)
+        popup._request_search = mock.Mock()
+        PopupWindow._load_more_items(popup)
+        popup._ensure_current_search.assert_called_once_with()
+        popup._request_search.assert_not_called()
+
+    def test_load_more_idle_loads_next_page(self):
+        popup = object.__new__(PopupWindow)
+        popup._visible = True
+        popup._search_pending = False
+        popup._loaded_limit = HISTORY_PAGE_SIZE
+        popup._total_items = 100
+        popup._current_search_query = "q"
+        popup._request_search = mock.Mock()
+        PopupWindow._load_more_items(popup)
+        popup._request_search.assert_called_once_with("q", reset=False, preserve_scroll=True)
+
+    def test_stale_preview_render_is_dropped_and_image_closed(self):
+        popup = object.__new__(PopupWindow)
+        popup._visible = True
+        popup._preview_entry_id = "other"
+        popup._preview_window = None
+        img = mock.Mock()
+        PopupWindow._render_image_preview(popup, "id", mock.Mock(), img)
+        img.close.assert_called_once_with()
+        self.assertIsNone(popup._preview_window)
+
+    def test_preview_worker_hands_render_to_ui_thread(self):
+        from PIL import Image as TestPILImage
+        buf = io.BytesIO()
+        TestPILImage.new("RGB", (4, 4), (255, 0, 0)).save(buf, format="PNG")
+        popup = object.__new__(PopupWindow)
+        popup._visible = True
+        popup.db = mock.Mock()
+        popup.db.get_image_data.return_value = buf.getvalue()
+        scheduled = []
+        popup.after = lambda delay, cb: scheduled.append((delay, cb)) or "id"
+        popup._render_image_preview = mock.Mock()
+        PopupWindow._load_image_preview(popup, 7, mock.Mock())
+        self.assertEqual(1, len(scheduled))
+        self.assertEqual(0, scheduled[0][0])
+        delay_cb = scheduled[0][1]
+        delay_cb()
+        rendered = popup._render_image_preview.call_args
+        self.assertEqual(7, rendered.args[0])
+        self.assertIsNotNone(rendered.args[2])
+
+    def test_failed_completion_logs_cancel_reason(self):
+        paste_engine = FakePasteEngine()
+        popup = FakePopup(paste_engine)
+        completion = PasteCompletion(
+            target_hwnd=100,
+            target_valid=True,
+            focus_attempted=True,
+            focus_succeeded=False,
+            focus_error=None,
+            send_input_count=0,
+            expected_input_count=4,
+            send_error=None,
+            success=False,
+            reason="focus_denied",
+        )
+        with self.assertLogs("app.popup_window", level="WARNING") as logs:
+            PopupWindow._handle_paste_completion(popup, 1, completion)
+        self.assertIn("focus_denied", "\n".join(logs.output))
+        self.assertEqual([], popup.db.touched)
+        self.assertEqual(["Copied to clipboard; automatic paste cancelled"], popup.notices)
 
 
 if __name__ == "__main__":

@@ -428,6 +428,109 @@ class PasteEngineTests(unittest.TestCase):
         self.assertEqual(0, completion.send_input_count)
         self.assertEqual(0, fake_user32.send_calls)
 
+    def test_hwnd_reuse_race_revalidated_after_delay(self):
+        # T1 (P1-1): window closed during the focus delay and the OS reused
+        # the HWND value. Foreground still reports the stale handle, but the
+        # revalidation must abort before SendInput.
+        fake_user32 = FakeUser32(send_count=4)
+        fake_user32.IsWindow = mock.Mock(side_effect=[True, False])
+        with (
+            mock.patch.object(paste_engine, "user32", fake_user32),
+            mock.patch.object(paste_engine.time, "sleep"),
+        ):
+            completion = PasteEngine()._focus_and_press(100)
+
+        self.assertFalse(completion.success)
+        self.assertEqual(0, fake_user32.send_calls)
+        self.assertEqual(0, completion.send_input_count)
+
+    def test_modifiers_repressed_before_sendinput_aborts(self):
+        # T2 (P2-1): modifiers released during the wait but re-pressed just
+        # before injection. The final one-frame sample must abort.
+        fake_user32 = FakeUser32(send_count=4)
+        calls = []
+
+        def gaks(key):
+            calls.append(key)
+            if len(calls) <= len(paste_engine.MODIFIER_KEYS):
+                return 0
+            return 0x8000 if key == 0x10 else 0
+
+        fake_user32.GetAsyncKeyState = gaks
+        with (
+            mock.patch.object(paste_engine, "user32", fake_user32),
+            mock.patch.object(paste_engine.time, "sleep"),
+        ):
+            completion = PasteEngine()._focus_and_press(100)
+
+        self.assertFalse(completion.success)
+        self.assertEqual(0, fake_user32.send_calls)
+        self.assertEqual("modifiers_held", completion.reason)
+
+    def test_oversize_image_rejected_before_clipboard_open(self):
+        # T3 (P2-5): oversized PNG input must be rejected before any
+        # clipboard or decode work. Uses a synthetic padded PNG only.
+        from app.config import MAX_IMAGE_BYTES
+
+        image = Image.new("RGB", (4, 4), (1, 2, 3))
+        with io.BytesIO() as buffer:
+            image.save(buffer, format="PNG")
+            small = buffer.getvalue()
+        image.close()
+        png_bytes = small + b"\x00" * (MAX_IMAGE_BYTES + 1 - len(small))
+        self.assertEqual(MAX_IMAGE_BYTES + 1, len(png_bytes))
+        with (
+            mock.patch.object(paste_engine, "_open_clipboard_retry") as retry,
+            mock.patch.object(paste_engine.win32clipboard, "EmptyClipboard") as empty,
+            mock.patch.object(paste_engine.win32clipboard, "SetClipboardData"),
+            mock.patch.object(paste_engine.win32clipboard, "CloseClipboard"),
+            mock.patch.object(PasteEngine, "_capture_written_sequence", return_value=999),
+        ):
+            result = PasteEngine()._set_clipboard_image(png_bytes)
+
+        self.assertFalse(result.clipboard_set)
+        retry.assert_not_called()
+        empty.assert_not_called()
+
+    def test_text_write_exception_closes_once_and_skips_worker(self):
+        # T4: clipboard write failure must release the clipboard exactly
+        # once and never start the paste worker. Synthetic failure only.
+        threads = SyncThreadFactory()
+        monitor = FakeMonitor()
+        engine = PasteEngine(thread_factory=threads)
+        with (
+            mock.patch.object(paste_engine, "_open_clipboard_retry", return_value=True),
+            mock.patch.object(paste_engine.win32clipboard, "EmptyClipboard"),
+            mock.patch.object(
+                paste_engine.win32clipboard,
+                "SetClipboardText",
+                side_effect=RuntimeError("synthetic failure"),
+            ),
+            mock.patch.object(paste_engine.win32clipboard, "CloseClipboard") as close,
+        ):
+            result = engine.paste("synthetic fixture", monitor=monitor)
+
+        self.assertFalse(result.clipboard_set)
+        self.assertFalse(result.started)
+        close.assert_called_once()
+        self.assertEqual([], threads.created)
+
+    def test_partial_sendinput_reports_send_error(self):
+        # T5 (P2-2): partial SendInput (3/4) must fail with send_error kept.
+        fake_user32 = FakeUser32(send_count=3)
+        fake_kernel32 = FakeKernel32(error=5)
+        with (
+            mock.patch.object(paste_engine, "user32", fake_user32),
+            mock.patch.object(paste_engine, "kernel32", fake_kernel32),
+            mock.patch.object(paste_engine.time, "sleep"),
+        ):
+            completion = PasteEngine()._focus_and_press(100)
+
+        self.assertFalse(completion.success)
+        self.assertEqual(3, completion.send_input_count)
+        self.assertEqual(5, completion.send_error)
+        self.assertEqual("send_input_incomplete", completion.reason)
+
     def test_completion_callback_exception_is_logged(self):
         threads = SyncThreadFactory()
         engine = StubPasteEngine(thread_factory=threads)

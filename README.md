@@ -78,7 +78,7 @@ For a shorter retention period or process exclusions, create `%APPDATA%\Clipboar
 {"retention_days": 7, "excluded_processes": ["PrivateApp.exe"]}
 ```
 
-Only exact executable names are accepted. When exclusions are configured, a clipboard update with an unknown owner is skipped rather than captured. This uses the clipboard owner process and cannot identify every source inside a shared browser or helper process. Invalid settings stop startup before recording and are logged without the settings' contents. Existing pinned entries do not expire. Clearing history does not securely erase SQLite free pages, old migration copies, or quarantined files.
+Only exact executable names are accepted. When exclusions are configured, a clipboard update with an unknown owner is skipped rather than captured. This uses the clipboard owner process and cannot identify every source inside a shared browser or helper process. Invalid settings stop startup before recording and are logged without the settings' contents. Existing pinned entries do not expire. Successful paste updates the entry timestamp (touch_entry) and restarts its retention window. Clearing history does not securely erase SQLite free pages, old migration copies, or quarantined files.
 
 When upgrading from a version that stored `clipboard_history.db` beside the application, the first migration creates a verified snapshot in the new location. The original database and any sidecar files remain as a recovery copy. Clearing the current history does not erase that old copy; remove it manually only after confirming the migrated history is complete and closing any old application instance. If migration fails, startup stops and records the error in the application log.
 

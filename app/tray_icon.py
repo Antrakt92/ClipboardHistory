@@ -80,10 +80,12 @@ class TrayIcon:
             return
         try:
             self.icon.notify(message, "Clipboard History")
-        except (NotImplementedError, RuntimeError, OSError):
+        except Exception:
             log.warning("Tray notification unavailable", exc_info=True)
 
     def start(self):
+        if self.icon:
+            return
         if not os.path.exists(ICON_PATH):
             try:
                 from app.create_icon import create_icon
@@ -132,3 +134,5 @@ class TrayIcon:
                 self.icon.stop()
             except Exception:
                 log.debug("Error stopping tray icon", exc_info=True)
+            finally:
+                self.icon = None

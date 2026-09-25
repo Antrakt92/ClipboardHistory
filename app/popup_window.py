@@ -231,6 +231,7 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._search_results = queue.Queue()
         self._search_thread_factory = threading.Thread
         self._paste_thread_factory = threading.Thread
+        self._preview_thread_factory = threading.Thread
         self._last_search_text = ""
         self._loaded_limit = HISTORY_PAGE_SIZE
         self._current_search_query = None
@@ -294,9 +295,11 @@ class PopupWindow(customtkinter.CTkToplevel):
 
         self._reset_clear_confirm(force=True)
 
-        # Load fresh data
-        self._load_items(reset=True)
-        self._search_requested_query = None
+        # Load fresh data off the UI thread: a large history stalls a
+        # synchronous read (~165-265 ms on extreme synthetic volumes), so
+        # render a cheap placeholder and fetch the first page async.
+        self._show_loading_placeholder()
+        self._request_search(None, reset=True)
 
         # Reset scroll to top
         try:
@@ -536,6 +539,28 @@ class PopupWindow(customtkinter.CTkToplevel):
     # Item list (all plain tk for speed)
     # ------------------------------------------------------------------
 
+    def _show_loading_placeholder(self):
+        """Render a cheap placeholder so show() never blocks on DB reads."""
+        if not self._visible:
+            return
+        self._hide_image_preview()
+        for widget in self._items_inner.winfo_children():
+            widget.destroy()
+        self._item_frames = []
+        self._item_data = []
+        self._selected_index = -1
+        self._hovered_index = -1
+        self._current_search_query = None
+        self._loaded_limit = HISTORY_PAGE_SIZE
+        self._total_items = 0
+        loading = tk.Label(
+            self._items_inner,
+            text="Loading\u2026",
+            font=("Segoe UI", 12), fg=TEXT_DIM, bg=BG, justify="center"
+        )
+        loading.pack(pady=50)
+        self._update_history_footer(0)
+
     def _load_items(self, search_query=None, reset=False, preserve_scroll=False, page=None,
                     search_error=False):
         if not self._visible:
@@ -633,6 +658,9 @@ class PopupWindow(customtkinter.CTkToplevel):
         if not self._visible:
             return
         if self._search_pending:
+            # A search is already in flight: refresh if the rows went stale
+            # instead of silently dropping the click.
+            self._ensure_current_search()
             return
         if self._loaded_limit >= self._total_items:
             return
@@ -803,17 +831,56 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._hide_image_preview()
         if not self._visible:
             return
+        # Decode off the UI thread: a large image stalls the popup on hover.
+        # PhotoImage creation stays on the UI thread (see _render_image_preview).
+        self._preview_entry_id = entry_id
+        try:
+            self._preview_thread_factory(
+                target=self._load_image_preview,
+                args=(entry_id, widget),
+                daemon=True,
+            ).start()
+        except (RuntimeError, OSError):
+            log.exception("Failed to start image preview worker")
+            self._preview_entry_id = None
+
+    def _load_image_preview(self, entry_id, widget):
         try:
             image_data = self.db.get_image_data(entry_id)
-            if not image_data:
-                return
-
+        except Exception:
+            log.exception("Image preview lookup failed")
+            return
+        if not image_data:
+            return
+        try:
             img = PILImage.open(io.BytesIO(image_data))
             try:
                 img.thumbnail(IMAGE_PREVIEW_SIZE, PILImage.Resampling.LANCZOS)
-                tk_img = ImageTk.PhotoImage(img)
-            finally:
+                img.load()
+            except Exception:
                 img.close()
+                raise
+        except Exception:
+            log.exception("Image preview decode failed")
+            return
+        try:
+            self.after(0, lambda: self._render_image_preview(entry_id, widget, img))
+        except Exception:
+            img.close()
+            log.exception("Failed to schedule image preview render")
+
+    def _render_image_preview(self, entry_id, widget, preview_img):
+        if not self._visible or self._preview_entry_id != entry_id:
+            try:
+                preview_img.close()
+            except (AttributeError, OSError):
+                log.debug("Stale image preview cleanup skipped")
+            return
+        try:
+            try:
+                tk_img = ImageTk.PhotoImage(preview_img)
+            finally:
+                preview_img.close()
 
             preview_win = tk.Toplevel(self)
             self._preview_window = preview_win
@@ -929,7 +996,13 @@ class PopupWindow(customtkinter.CTkToplevel):
                 self._load_items(query, reset=reset, page=([], 0), search_error=True)
                 return
         if self._search_poll_after_id is None:
-            self._search_poll_after_id = self.after(30, self._poll_search_results)
+            try:
+                self._search_poll_after_id = self.after(30, self._poll_search_results)
+            except (RuntimeError, tk.TclError):
+                # Window destroyed at quit: the worker result stays queued
+                # and is discarded by generation check on next open.
+                log.debug("Failed to schedule history search poll (window closed)")
+                return
 
     def _run_search_worker(self):
         while True:
@@ -1126,10 +1199,11 @@ class PopupWindow(customtkinter.CTkToplevel):
             self.db.touch_entry(entry_id)
         else:
             log.warning(
-                "Paste attempt failed for entry %s: sent %s/%s input events",
+                "Paste attempt failed for entry %s: sent %s/%s input events (reason=%s)",
                 entry_id,
                 completion.send_input_count,
                 completion.expected_input_count,
+                completion.reason,
             )
             self._notify_paste_result(True)
 

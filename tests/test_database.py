@@ -818,6 +818,71 @@ class DatabaseTests(unittest.TestCase):
             self.assertEqual(0, db.clear_unpinned())
             self.assertEqual(0, db.clear_all())
 
+    def test_bulk_clear_checkpoints_wal_and_reuses_free_pages(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "history.db")
+            db = Database(path)
+            try:
+                with db.lock:
+                    insert_text_entry(db, "pinned fixture", pinned=1)
+                    for number in range(300):
+                        insert_text_entry(db, f"synthetic row {number} " + "x" * 200)
+                    db.conn.commit()
+                pages_before = db.conn.execute("PRAGMA page_count").fetchone()[0]
+
+                statements = []
+                db.conn.set_trace_callback(statements.append)
+                self.assertEqual(300, db.clear_unpinned())
+                db.conn.set_trace_callback(None)
+                self.assertTrue(any("wal_checkpoint" in statement.lower() for statement in statements))
+                self.assertEqual(["pinned fixture"], [row["preview"] for row in db.get_history()])
+
+                statements = []
+                db.conn.set_trace_callback(statements.append)
+                self.assertEqual(1, db.clear_all())
+                db.conn.set_trace_callback(None)
+                self.assertTrue(any("wal_checkpoint" in statement.lower() for statement in statements))
+                self.assertEqual(0, db.get_history_count())
+
+                fresh = sqlite3.connect(path)
+                try:
+                    count = fresh.execute("SELECT COUNT(*) FROM clipboard_history").fetchone()[0]
+                finally:
+                    fresh.close()
+                self.assertEqual(0, count)
+
+                wal_path = path + "-wal"
+                self.assertFalse(os.path.exists(wal_path) and os.path.getsize(wal_path) > 0)
+                free_after_clear = db.conn.execute("PRAGMA freelist_count").fetchone()[0]
+                self.assertGreater(free_after_clear, 0)
+
+                with db.lock:
+                    for number in range(300):
+                        insert_text_entry(db, f"refill row {number} " + "y" * 200)
+                    db.conn.commit()
+                self.assertEqual(pages_before, db.conn.execute("PRAGMA page_count").fetchone()[0])
+            finally:
+                db.close()
+
+    def test_search_returns_empty_page_when_read_connection_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                db.add_entry("synthetic search")
+                with mock.patch(
+                    "app.database.sqlite3.connect",
+                    side_effect=sqlite3.OperationalError("synthetic close race"),
+                ):
+                    self.assertEqual(([], 0), db.search_history_page(search_query="synthetic"))
+                with mock.patch.object(
+                    Database, "_query_history_page",
+                    side_effect=sqlite3.OperationalError("synthetic read race"),
+                ):
+                    self.assertEqual(([], 0), db.search_history_page(search_query="synthetic"))
+            finally:
+                db.close()
+            self.assertEqual(([], 0), db.search_history_page(search_query="synthetic"))
+
     def test_history_count_counts_all_rows_and_returns_zero_when_closed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(os.path.join(temp_dir, "history.db"))

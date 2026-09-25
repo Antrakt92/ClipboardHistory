@@ -1,5 +1,11 @@
+import os
+import tempfile
 import unittest
+from unittest import mock
 
+from PIL import Image
+
+import app.tray_icon as tray_icon_module
 from app.runtime_status import RuntimeIssue
 from app.tray_icon import TRAY_BASE_TITLE, TrayIcon
 
@@ -79,6 +85,34 @@ class TrayIconStatusTests(unittest.TestCase):
         self.assertTrue(paused["value"])
         self.assertEqual(f"{TRAY_BASE_TITLE} - Recording paused", tray.icon.title)
         self.assertEqual(1, tray.icon.update_count)
+
+    def test_double_start_creates_single_icon_and_stop_resets(self):
+        tray = self.make_tray()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            icon_path = os.path.join(temp_dir, "icon.png")
+            Image.new("RGB", (16, 16)).save(icon_path)
+            with mock.patch.object(tray_icon_module, "ICON_PATH", icon_path), \
+                mock.patch.object(tray_icon_module.pystray, "Icon") as icon_cls, \
+                mock.patch("threading.Thread"):
+                icon_cls.side_effect = lambda *args, **kwargs: mock.MagicMock()
+                tray.start()
+                tray.start()
+                self.assertEqual(1, icon_cls.call_count)
+                self.assertIsNotNone(tray.icon)
+                tray.stop()
+                self.assertIsNone(tray.icon)
+                tray.start()
+                self.assertEqual(2, icon_cls.call_count)
+                self.assertIsNotNone(tray.icon)
+                tray.stop()
+                self.assertIsNone(tray.icon)
+
+    def test_notify_backend_error_logs_warning_without_raising(self):
+        tray = self.make_tray()
+        tray.icon = mock.MagicMock()
+        tray.icon.notify.side_effect = ValueError("synthetic backend failure")
+        with self.assertLogs("app.tray_icon", level="WARNING"):
+            tray.notify("synthetic notice")
 
 
 if __name__ == "__main__":

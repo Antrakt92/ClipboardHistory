@@ -29,6 +29,12 @@ replacements = {name: mock.Mock() for name in (
     'ensure_data_dir', 'configure_logging', 'migrate_legacy_db', 'create_icon',
     'Database', 'ClipboardMonitor', 'HotkeyManager', 'TrayIcon'
 )}
+# Keep the benchmark off the real %APPDATA%: stub privacy settings instead of
+# reading the user's file. Constructing the app still builds a real Tk root,
+# so this benchmark requires a display and cannot run headless.
+replacements['load_privacy_settings'] = mock.Mock(
+    return_value={"retention_days": 30, "excluded_processes": ()}
+)
 with mock.patch.dict(app_class.__init__.__globals__, replacements):
     start = time.perf_counter()
     app = app_class()

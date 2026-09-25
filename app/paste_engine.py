@@ -8,6 +8,8 @@ import win32clipboard
 from dataclasses import dataclass
 from typing import Optional
 
+from app.config import MAX_IMAGE_BYTES
+
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
@@ -211,6 +213,8 @@ class PasteEngine:
         if target_valid and focus_succeeded:
             time.sleep(0.15)
             modifiers_released = self._wait_for_modifier_release()
+            # Revalidate HWND after the delay: the window may have closed and its handle reused.
+            target_valid = bool(target_hwnd and user32.IsWindow(target_hwnd))
 
         # Windows can deny activation or the user can switch windows during the delay.
         # Never inject a saved clipboard item into an unconfirmed foreground target.
@@ -242,6 +246,21 @@ class PasteEngine:
                 send_error=None,
                 success=False,
                 reason=reason,
+            )
+
+        # One-frame recheck right before injection; never synthesize a release of user-held keys.
+        if any(user32.GetAsyncKeyState(key) & 0x8000 for key in MODIFIER_KEYS):
+            return PasteCompletion(
+                target_hwnd=target_hwnd,
+                target_valid=target_valid,
+                focus_attempted=focus_attempted,
+                focus_succeeded=focus_succeeded,
+                focus_error=focus_error,
+                send_input_count=0,
+                expected_input_count=EXPECTED_INPUT_COUNT,
+                send_error=None,
+                success=False,
+                reason="modifiers_held",
             )
 
         # Ctrl+V via SendInput (more reliable than deprecated keybd_event)
@@ -309,6 +328,12 @@ class PasteEngine:
 
     def _set_clipboard_image(self, png_bytes):
         try:
+            if not png_bytes or len(png_bytes) > MAX_IMAGE_BYTES:
+                log.debug(
+                    "PNG image missing or too large (%s bytes), skipping clipboard write",
+                    len(png_bytes) if png_bytes else 0,
+                )
+                return ClipboardWriteResult(False)
             from PIL import Image
 
             with io.BytesIO(png_bytes) as src_buf:

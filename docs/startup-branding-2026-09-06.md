@@ -3,7 +3,7 @@
 This patch follows v1.0.0 and keeps its source-release format: GitHub's source
 archives contain the Python application, launcher source, and existing icon.
 No prebuilt executable is distributed. The locally compiled launcher reports
-file and assembly version `1.0.1.0`.
+file and assembly version `1.0.2.0`.
 
 The existing `ClipboardHistoryManager` Run value launched `pythonw.exe` directly,
 which exposed Python's executable branding in Windows. The value now points to

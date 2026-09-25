@@ -209,6 +209,8 @@ class Database:
         rows = cursor.fetchall()
         for row in rows:
             content = row["content"] or ""
+            # Legacy rows carry no truncation metadata; mark truncated=0 blindly.
+            # The original untruncated text is unrecoverable.
             self.conn.execute(
                 """UPDATE clipboard_history
                    SET content_hash = ?, original_content_len = ?, truncated = 0
@@ -362,13 +364,19 @@ class Database:
             return [], 0
         # Path.as_uri escapes spaces, percent signs and Unicode in Windows paths.
         uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, timeout=3.0)
+        # A concurrent close/checkpoint must not raise out of a best-effort
+        # search; report an empty page instead. No writer lock is taken here
+        # so slow scans never block history reads or clipboard writes.
         try:
-            conn.row_factory = sqlite3.Row
-            conn.create_function("unicode_contains", 2, self._unicode_contains)
-            return self._query_history_page(conn, limit, offset, search_query)
-        finally:
-            conn.close()
+            conn = sqlite3.connect(uri, uri=True, timeout=3.0)
+            try:
+                conn.row_factory = sqlite3.Row
+                conn.create_function("unicode_contains", 2, self._unicode_contains)
+                return self._query_history_page(conn, limit, offset, search_query)
+            finally:
+                conn.close()
+        except sqlite3.OperationalError:
+            return [], 0
 
     @classmethod
     def _query_history_page(cls, conn, limit, offset, search_query):
@@ -469,6 +477,7 @@ class Database:
                 "DELETE FROM clipboard_history WHERE pinned = 0"
             )
             self.conn.commit()
+            self._checkpoint()
             deleted = cursor.rowcount
         return deleted
 
@@ -478,6 +487,7 @@ class Database:
                 return 0
             cursor = self.conn.execute("DELETE FROM clipboard_history")
             self.conn.commit()
+            self._checkpoint()
             deleted = cursor.rowcount
         return deleted
 

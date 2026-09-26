@@ -1,13 +1,16 @@
+import contextlib
 import glob
+import io
 import os
 import sqlite3
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from app.database import Database
-from tools.secure_compact import EXIT_ACTIVE, EXIT_ERROR, EXIT_OK, main
+from tools.secure_compact import EXIT_ACTIVE, EXIT_ERROR, EXIT_OK, main, vacuum_into
 
 
 def _make_db_with_free_pages(path, keep=5, fill=30, payload_len=8000):
@@ -56,6 +59,49 @@ def _companion_files(path):
 
 
 class SecureCompactTests(unittest.TestCase):
+    def test_vacuum_into_reads_without_sidecars(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            src = os.path.join(temp_dir, "src.db")
+            dst = os.path.join(temp_dir, "dst.db")
+            conn = sqlite3.connect(src)
+            try:
+                conn.execute("CREATE TABLE t(x)")
+                conn.executemany("INSERT INTO t VALUES (?)", [(i,) for i in range(50)])
+                conn.commit()
+                conn.execute("PRAGMA journal_mode=WAL")
+            finally:
+                conn.close()
+            for leftover in ("src.db-wal", "src.db-shm"):
+                try:
+                    os.remove(os.path.join(temp_dir, leftover))
+                except OSError:
+                    pass
+            vacuum_into(src, dst)
+            self.assertEqual(sorted(os.listdir(temp_dir)), ["dst.db", "src.db"])
+
+    def test_unremovable_backup_is_a_warning_not_a_failure(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = os.path.join(temp_dir, "history.db")
+            db = Database(path)
+            try:
+                db.add_entry("SYNTH-drop-fail")
+                db.clear_unpinned()
+            finally:
+                db.close()
+            real_remove = os.remove
+
+            def fail_backup_removal(name):
+                if str(name).endswith(".bak"):
+                    raise OSError("synthetic removal failure")
+                return real_remove(name)
+
+            with mock.patch.object(os, "remove", side_effect=fail_backup_removal):
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr):
+                    self.assertEqual(EXIT_OK, main(["--db", path, "--yes", "--drop-backup"]))
+                self.assertIn("warning", stderr.getvalue())
+            self.assertEqual(1, len(glob.glob(path + ".precompact-*.bak")))
+
     def test_dry_run_writes_nothing(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = os.path.join(temp_dir, "history.db")

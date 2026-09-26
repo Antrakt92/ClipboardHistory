@@ -186,6 +186,19 @@ class ClipboardHistoryApp:
     def _show_popup_from_tray(self):
         if not self._ui_running:
             return
+        hotkey = getattr(self, "hotkey", None)
+        if hotkey is not None and hotkey.error_message is not None:
+            # Transient RegisterHotKey conflict (e.g. back-to-back restart
+            # while the old thread still holds it): one retry per tray open.
+            try:
+                hotkey.stop()
+            except Exception:
+                log.exception("Hotkey stop before retry failed")
+            retry = HotkeyManager(on_activate=self._on_hotkey)
+            retry.start()
+            if retry.wait_ready():
+                self.hotkey = retry
+                self._clear_runtime_issue("hotkey")
         # Capture foreground window on the tray thread before Tk shifts focus
         hwnd = ctypes.windll.user32.GetForegroundWindow()
         self._schedule_ui_callback(self.show_popup, hwnd)

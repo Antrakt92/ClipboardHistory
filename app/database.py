@@ -366,7 +366,11 @@ class Database:
             return self._query_history_page(self.conn, limit, offset, search_query)
 
     def search_history_page(self, limit=50, offset=0, search_query=None):
-        """Search on an independent read-only WAL connection, away from the writer lock."""
+        """Search on an independent read-only WAL connection, away from the writer lock.
+
+        Returns None (not an empty page) when the read itself fails, so the
+        popup can show "unavailable" instead of a false "no matches".
+        """
         if self.db_path == ":memory:":
             return self.get_history_page(limit=limit, offset=offset, search_query=search_query)
         if self._closed:
@@ -374,7 +378,7 @@ class Database:
         # Path.as_uri escapes spaces, percent signs and Unicode in Windows paths.
         uri = Path(self.db_path).resolve().as_uri() + "?mode=ro"
         # A concurrent close/checkpoint must not raise out of a best-effort
-        # search; report an empty page instead. No writer lock is taken here
+        # search; report failure instead. No writer lock is taken here
         # so slow scans never block history reads or clipboard writes.
         try:
             conn = sqlite3.connect(uri, uri=True, timeout=3.0)
@@ -385,7 +389,7 @@ class Database:
             finally:
                 conn.close()
         except sqlite3.OperationalError:
-            return [], 0
+            return None
 
     @classmethod
     def _query_history_page(cls, conn, limit, offset, search_query):
@@ -512,7 +516,7 @@ class Database:
                 DELETE FROM clipboard_history WHERE id IN (
                     SELECT id FROM clipboard_history
                     WHERE pinned = 0
-                    ORDER BY timestamp ASC
+                    ORDER BY timestamp ASC, id ASC
                     LIMIT ?
                 )
             """, (to_delete,))

@@ -77,6 +77,7 @@ class TrayIcon:
 
     def notify(self, message):
         if not self.icon:
+            log.warning("Tray notification dropped (no icon): %s", message)
             return
         try:
             self.icon.notify(message, "Clipboard History")

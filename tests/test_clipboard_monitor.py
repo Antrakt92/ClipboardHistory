@@ -12,6 +12,7 @@ from app.clipboard_monitor import (
     CLIPBOARD_READ_BUSY,
     CLIPBOARD_READ_ERROR,
     CLIPBOARD_READ_OK,
+    CLIPBOARD_READ_SKIPPED,
     ClipboardMonitor,
 )
 from app.config import MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_RAW_IMAGE_BYTES
@@ -147,7 +148,7 @@ class ClipboardMonitorImageTests(unittest.TestCase):
             mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard") as open_clipboard,
             mock.patch.object(monitor, "_process_dib_image") as process_image,
         ):
-            self.assertEqual(CLIPBOARD_READ_OK, monitor._read_clipboard_once())
+            self.assertEqual(CLIPBOARD_READ_SKIPPED, monitor._read_clipboard_once())
         open_clipboard.assert_not_called()
         process_image.assert_not_called()
         callback.assert_not_called()
@@ -165,6 +166,20 @@ class ClipboardMonitorImageTests(unittest.TestCase):
             self.assertEqual(CLIPBOARD_READ_OK, monitor._read_clipboard_once())
         process_image.assert_not_called()
         callback.assert_not_called()
+
+    def test_paused_skip_preserves_active_read_issue(self):
+        statuses = []
+        monitor = ClipboardMonitor(
+            lambda *_args: None,
+            on_status=lambda *args: statuses.append(args),
+            should_record=lambda: False,
+        )
+        monitor._clipboard_read_issue_active = True
+
+        monitor._read_clipboard()
+
+        self.assertTrue(monitor._clipboard_read_issue_active)
+        self.assertEqual([], statuses)
 
     def test_stored_png_cap_is_12_mib(self):
         self.assertEqual(12 * 1024 * 1024, MAX_IMAGE_BYTES)
@@ -654,6 +669,58 @@ class ClipboardMonitorRetryTests(unittest.TestCase):
         second_timer = timer_factory.timers[1]
         monitor.stop(timeout=0)
         self.assertTrue(second_timer.cancelled)
+
+
+class ClipboardMonitorOwnSequenceTests(unittest.TestCase):
+    def test_sequence_match_consumes_own_update_and_foreign_records(self):
+        recorded = []
+        monitor = ClipboardMonitor(lambda content, kind: recorded.append((content, kind)))
+        monitor.set_ignore_next()
+        monitor.set_own_sequence(100)
+        with mock.patch.object(clipboard_monitor, "user32") as fake_user32:
+            fake_user32.GetClipboardSequenceNumber.return_value = 100
+            with mock.patch.object(monitor, "_read_clipboard") as read:
+                monitor._wnd_proc(0, clipboard_monitor.WM_CLIPBOARDUPDATE, 0, 0)
+                read.assert_not_called()
+            fake_user32.GetClipboardSequenceNumber.return_value = 101
+            with mock.patch.object(monitor, "_read_clipboard") as read_foreign:
+                monitor._wnd_proc(0, clipboard_monitor.WM_CLIPBOARDUPDATE, 0, 0)
+                read_foreign.assert_called_once_with()
+        self.assertEqual([], recorded)
+
+    def test_two_verified_sequences_both_consumed(self):
+        monitor = ClipboardMonitor(lambda *_args: None)
+        monitor.set_ignore_next()
+        monitor.set_own_sequence(100)
+        monitor.set_ignore_next()
+        monitor.set_own_sequence(101)
+        with mock.patch.object(clipboard_monitor, "user32") as fake_user32:
+            fake_user32.GetClipboardSequenceNumber.return_value = 101
+            with mock.patch.object(monitor, "_read_clipboard") as read:
+                monitor._wnd_proc(0, clipboard_monitor.WM_CLIPBOARDUPDATE, 0, 0)
+                monitor._wnd_proc(0, clipboard_monitor.WM_CLIPBOARDUPDATE, 0, 0)
+                read.assert_not_called()
+
+    def test_unverified_write_keeps_single_consume(self):
+        monitor = ClipboardMonitor(lambda *_args: None)
+        monitor.set_ignore_next()
+        with mock.patch.object(clipboard_monitor, "user32") as fake_user32:
+            fake_user32.GetClipboardSequenceNumber.return_value = 999
+            with mock.patch.object(monitor, "_read_clipboard") as read:
+                monitor._wnd_proc(0, clipboard_monitor.WM_CLIPBOARDUPDATE, 0, 0)
+                read.assert_not_called()
+                monitor._wnd_proc(0, clipboard_monitor.WM_CLIPBOARDUPDATE, 0, 0)
+                read.assert_called_once_with()
+
+    def test_stop_clears_thread_id_and_skips_dead_post(self):
+        monitor = ClipboardMonitor(lambda *_args: None)
+        monitor._thread_id = 424242
+        monitor._thread = mock.Mock()
+        monitor._thread.is_alive.return_value = False
+        with mock.patch.object(clipboard_monitor.user32, "PostThreadMessageW") as post:
+            monitor.stop(timeout=0)
+            post.assert_not_called()
+        self.assertIsNone(monitor._thread_id)
 
 
 class ClipboardMonitorPrePasteReadTests(unittest.TestCase):

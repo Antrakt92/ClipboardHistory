@@ -51,6 +51,7 @@ CLIPBOARD_ALLOCATION_SLACK = 64 * 1024
 class ClipboardWriteResult:
     clipboard_set: bool
     sequence: Optional[int] = None
+    foreign_evidence: bool = False
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,18 @@ class PasteEngine:
 
         if content_type == "image" and image_data:
             write_result = self._set_clipboard_image(image_data)
+        elif content_type == "image":
+            # A history row without image bytes must never reach the clipboard
+            # as an empty write: that would wipe the user's current content.
+            log.warning("Image paste requested without image data, aborting paste")
+            if monitor:
+                monitor.clear_ignore()
+            return PasteStartResult(
+                clipboard_set=False,
+                started=False,
+                content_type=content_type,
+                reason="clipboard_write_failed",
+            )
         else:
             write_result = self._set_clipboard_text(content)
 
@@ -151,13 +164,20 @@ class PasteEngine:
             )
 
         if write_result.sequence is None:
-            # The write did emit a clipboard update; keep its ignore-next state.
+            # The write did emit a clipboard update; keep its ignore-next state,
+            # unless the readback saw foreign content: then our suppression
+            # would eat someone else's copy, so drop it and let it record.
+            if write_result.foreign_evidence and monitor:
+                monitor.clear_ignore()
             return PasteStartResult(
                 clipboard_set=True,
                 started=False,
                 content_type=content_type,
                 reason="clipboard_verification_failed",
             )
+
+        if monitor:
+            monitor.set_own_sequence(write_result.sequence)
 
         # Run focus + keypress in a thread to avoid blocking Tk main loop
         self._thread_factory(
@@ -259,6 +279,31 @@ class PasteEngine:
                 reason="modifiers_held",
             )
 
+        # Final gate immediately before injection: focus or clipboard may have
+        # changed while the modifier wait and input assembly ran. Residual and
+        # accepted: a recycled HWND owned by a foreground window is
+        # indistinguishable from the original target from user mode.
+        if user32.GetForegroundWindow() != target_hwnd:
+            gated_reason = "focus_changed"
+        elif (expected_sequence not in (None, 0)
+                and user32.GetClipboardSequenceNumber() != expected_sequence):
+            gated_reason = "clipboard_changed"
+        else:
+            gated_reason = None
+        if gated_reason is not None:
+            return PasteCompletion(
+                target_hwnd=target_hwnd,
+                target_valid=target_valid,
+                focus_attempted=focus_attempted,
+                focus_succeeded=focus_succeeded,
+                focus_error=focus_error,
+                send_input_count=0,
+                expected_input_count=EXPECTED_INPUT_COUNT,
+                send_error=None,
+                success=False,
+                reason=gated_reason,
+            )
+
         # Ctrl+V via SendInput (more reliable than deprecated keybd_event)
         inputs = (INPUT * EXPECTED_INPUT_COUNT)(
             self._make_key_input(VK_CONTROL, SCAN_CONTROL),
@@ -315,7 +360,7 @@ class PasteEngine:
                 win32clipboard.SetClipboardText(content, win32clipboard.CF_UNICODETEXT)
             finally:
                 win32clipboard.CloseClipboard()
-            return ClipboardWriteResult(True, self._capture_written_sequence(
+            return ClipboardWriteResult(True, *self._capture_written_sequence(
                 win32clipboard.CF_UNICODETEXT, content
             ))
         except Exception:
@@ -347,7 +392,7 @@ class PasteEngine:
                 win32clipboard.SetClipboardData(win32clipboard.CF_DIB, dib_data)
             finally:
                 win32clipboard.CloseClipboard()
-            return ClipboardWriteResult(True, self._capture_written_sequence(
+            return ClipboardWriteResult(True, *self._capture_written_sequence(
                 win32clipboard.CF_DIB, dib_data
             ))
         except Exception:
@@ -358,26 +403,29 @@ class PasteEngine:
     def _capture_written_sequence(content_format, expected_content):
         # Closing a write can synthesize formats and advance the sequence. Reopen
         # read-only and confirm our payload before trusting the post-close sequence.
+        # Returns (sequence|None, foreign_evidence): True only when the clipboard
+        # observably holds someone else's content (missing format or different
+        # bytes) as opposed to a busy clipboard or allocator-size effects.
         try:
             # Another process can briefly own the clipboard immediately after
             # our close. Retry the readback while still validating exact bytes.
             if not _open_clipboard_retry(attempts=3, delay=0.025):
-                return None
+                return None, False
             try:
                 if not win32clipboard.IsClipboardFormatAvailable(content_format):
-                    return None
+                    return None, True
                 expected_size = (
                     len(expected_content.encode("utf-16-le", errors="surrogatepass")) + 2
                     if content_format == win32clipboard.CF_UNICODETEXT else len(expected_content)
                 )
                 handle = win32clipboard.GetClipboardDataHandle(content_format)
                 if kernel32.GlobalSize(handle) > expected_size + CLIPBOARD_ALLOCATION_SLACK:
-                    return None
+                    return None, False
                 if win32clipboard.GetClipboardData(content_format) != expected_content:
-                    return None
-                return user32.GetClipboardSequenceNumber() or None
+                    return None, True
+                return user32.GetClipboardSequenceNumber() or None, False
             finally:
                 win32clipboard.CloseClipboard()
         except Exception:
             log.debug("Clipboard changed or became unavailable after writing", exc_info=True)
-            return None
+            return None, False

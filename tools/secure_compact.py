@@ -158,8 +158,13 @@ def _fsync_dir(dir_path_str):
 
 
 def vacuum_into(src_str, dst_str):
-    """Rebuild *src* into *dst* without modifying the source database."""
-    conn = sqlite3.connect(src_str, timeout=10.0)
+    """Rebuild *src* into *dst* without modifying the source database.
+
+    The source is opened read-only and immutable, so even the read cannot
+    create -shm/-wal sidecars next to it.
+    """
+    uri = Path(src_str).resolve().as_uri() + "?mode=ro&immutable=1"
+    conn = sqlite3.connect(uri, uri=True, timeout=10.0)
     try:
         conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
         conn.execute("VACUUM INTO " + _quote_literal(dst_str))
@@ -261,8 +266,12 @@ def main(argv=None):
         return EXIT_OK
 
     stamp = _utc_stamp()
-    backup_path = _unique_path(f"{db_path_str}.precompact-{stamp}.bak")
-    tmp_path = _unique_path(f"{db_path_str}.compact-{stamp}-{os.getpid()}.tmp")
+    try:
+        backup_path = _unique_path(f"{db_path_str}.precompact-{stamp}.bak")
+        tmp_path = _unique_path(f"{db_path_str}.compact-{stamp}-{os.getpid()}.tmp")
+    except OSError as exc:
+        _eprint(f"error: cannot pick companion paths: {exc}")
+        return EXIT_ERROR
     parent = str(Path(db_path_str).resolve().parent)
 
     try:
@@ -363,8 +372,8 @@ def main(argv=None):
             _fsync_dir(parent)
             print("backup removed (--drop-backup)")
         except OSError as exc:
+            # Compaction itself succeeded; a leftover backup is untidy, not a failure.
             _eprint(f"warning: could not remove backup {backup_path}: {exc}")
-            return EXIT_ERROR
     else:
         print(f"backup kept: {backup_path}")
         _rollback_hint(db_path_str, str(backup_path))

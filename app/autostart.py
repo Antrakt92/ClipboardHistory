@@ -84,7 +84,15 @@ def is_autostart_enabled():
                 return False
             parts = _split_command_line(command)
             if len(parts) == 3:
-                return launcher_is_current(launcher_path())
+                if launcher_is_current(launcher_path()):
+                    return True
+                # Orphaned build stamp, but the entry points at an existing
+                # launcher: Windows will still launch it, so report enabled
+                # rather than pretending autostart is off. Toggling rebuilds.
+                if os.path.exists(launcher_path()):
+                    log.warning("Autostart launcher stamp is missing or stale; entry still active")
+                    return True
+                return False
             return True
     except (FileNotFoundError, OSError):
         return False

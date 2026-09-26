@@ -1,4 +1,5 @@
 import customtkinter
+import contextlib
 import ctypes
 import ctypes.wintypes
 import io
@@ -243,8 +244,13 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._preview_after_id = None
         self._preview_photo = None
         self._preview_entry_id = None
+        self._preview_seq = 0
+        self._preview_results = queue.Queue()
         self._pending_clear_action = None
         self._clear_reset_after_id = None
+        self._clear_pending = False
+        self._clear_results = queue.Queue()
+        self._work_thread_factory = threading.Thread
         self._load_more_btn = None
         self._clear_unpinned_btn = None
         self._delete_all_btn = None
@@ -271,6 +277,11 @@ class PopupWindow(customtkinter.CTkToplevel):
         self.bind("<Return>", lambda e: self._paste_selected())
         self.bind("<Delete>", self._delete_selected)
         self.bind("<Control-p>", lambda e: self._pin_selected())
+        # Worker threads must never touch Tk directly (Tcl is not
+        # thread-safe); they queue decoded images and wake the UI thread
+        # with event_generate, the documented cross-thread mechanism.
+        self.bind("<<ImagePreviewReady>>", self._on_preview_ready)
+        self.bind("<<ClearDone>>", self._on_clear_done)
 
         # Start hidden — show() will make it visible
         self.withdraw()
@@ -561,7 +572,7 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._update_history_footer(0)
 
     def _load_items(self, search_query=None, reset=False, preserve_scroll=False, page=None,
-                    search_error=False):
+                    search_error=False, thumbs=None):
         if not self._visible:
             return
 
@@ -626,7 +637,7 @@ class PopupWindow(customtkinter.CTkToplevel):
                 ).pack(fill="x", padx=10, pady=(2, 2))
 
             idx = len(self._item_frames)
-            frame = self._create_item_widget(entry, idx, old_cache)
+            frame = self._create_item_widget(entry, idx, old_cache, decoded_thumbs=thumbs)
             self._item_frames.append(frame)
             self._item_data.append(entry)
 
@@ -666,7 +677,7 @@ class PopupWindow(customtkinter.CTkToplevel):
         self._loaded_limit += HISTORY_PAGE_SIZE
         self._request_search(self._current_search_query, reset=False, preserve_scroll=True)
 
-    def _create_item_widget(self, entry, index, old_thumb_cache=None):
+    def _create_item_widget(self, entry, index, old_thumb_cache=None, decoded_thumbs=None):
         is_pinned = entry["pinned"]
         is_image = entry["content_type"] == "image"
         normal_bg = SURFACE_PINNED if is_pinned else SURFACE
@@ -682,7 +693,8 @@ class PopupWindow(customtkinter.CTkToplevel):
             row.pack(fill="x", padx=10, pady=5)
             clickable.append(row)
 
-            thumb = self._create_thumbnail(row, entry["id"], normal_bg, old_thumb_cache)
+            thumb = self._create_thumbnail(row, entry["id"], normal_bg, old_thumb_cache,
+                                               decoded_thumbs.get(entry["id"]) if decoded_thumbs else None)
             if thumb:
                 thumb.pack(side="left", padx=(0, 8))
                 clickable.append(thumb)
@@ -801,7 +813,7 @@ class PopupWindow(customtkinter.CTkToplevel):
     # Thumbnails & image preview
     # ------------------------------------------------------------------
 
-    def _create_thumbnail(self, parent, entry_id, bg_color, old_cache=None):
+    def _create_thumbnail(self, parent, entry_id, bg_color, old_cache=None, decoded=None):
         try:
             if old_cache and entry_id in old_cache:
                 tk_img = old_cache[entry_id]
@@ -809,13 +821,21 @@ class PopupWindow(customtkinter.CTkToplevel):
                 self._thumb_cache[entry_id] = tk_img
                 return label
 
-            image_data = self.db.get_image_data(entry_id)
-            if not image_data:
-                return None
+            if decoded is None:
+                image_data = self.db.get_image_data(entry_id)
+                if not image_data:
+                    return None
 
-            img = PILImage.open(io.BytesIO(image_data))
+                img = PILImage.open(io.BytesIO(image_data))
+                try:
+                    img.thumbnail(IMAGE_THUMB_SIZE, PILImage.Resampling.LANCZOS)
+                    img.load()
+                except Exception:
+                    img.close()
+                    raise
+            else:
+                img = decoded
             try:
-                img.thumbnail(IMAGE_THUMB_SIZE, PILImage.Resampling.LANCZOS)
                 tk_img = ImageTk.PhotoImage(img)
             finally:
                 img.close()
@@ -833,17 +853,18 @@ class PopupWindow(customtkinter.CTkToplevel):
         # Decode off the UI thread: a large image stalls the popup on hover.
         # PhotoImage creation stays on the UI thread (see _render_image_preview).
         self._preview_entry_id = entry_id
+        self._preview_seq += 1
         try:
             self._preview_thread_factory(
                 target=self._load_image_preview,
-                args=(entry_id, widget),
+                args=(entry_id, widget, self._preview_seq),
                 daemon=True,
             ).start()
         except (RuntimeError, OSError):
             log.exception("Failed to start image preview worker")
             self._preview_entry_id = None
 
-    def _load_image_preview(self, entry_id, widget):
+    def _load_image_preview(self, entry_id, widget, seq):
         try:
             image_data = self.db.get_image_data(entry_id)
         except Exception:
@@ -852,21 +873,36 @@ class PopupWindow(customtkinter.CTkToplevel):
         if not image_data:
             return
         try:
-            img = PILImage.open(io.BytesIO(image_data))
-            try:
-                img.thumbnail(IMAGE_PREVIEW_SIZE, PILImage.Resampling.LANCZOS)
-                img.load()
-            except Exception:
-                img.close()
-                raise
+                img = PILImage.open(io.BytesIO(image_data))
+                decoded = False
+                try:
+                    img.thumbnail(IMAGE_THUMB_SIZE, PILImage.Resampling.LANCZOS)
+                    img.load()
+                    decoded = True
+                finally:
+                    if not decoded:
+                        img.close()
         except Exception:
             log.exception("Image preview decode failed")
             return
+        self._preview_results.put((seq, entry_id, widget, img))
         try:
-            self.after(0, lambda: self._render_image_preview(entry_id, widget, img))
+            self.event_generate("<<ImagePreviewReady>>", when="tail")
         except Exception:
             img.close()
-            log.exception("Failed to schedule image preview render")
+            log.exception("Failed to signal image preview readiness")
+
+    def _on_preview_ready(self, _event=None):
+        while True:
+            try:
+                seq, entry_id, widget, img = self._preview_results.get_nowait()
+            except queue.Empty:
+                return
+            if not self._visible or seq != self._preview_seq:
+                with contextlib.suppress(Exception):
+                    img.close()
+                continue
+            self._render_image_preview(entry_id, widget, img)
 
     def _render_image_preview(self, entry_id, widget, preview_img):
         if not self._visible or self._preview_entry_id != entry_id:
@@ -926,6 +962,11 @@ class PopupWindow(customtkinter.CTkToplevel):
             self._hide_image_preview()
 
     def _hide_image_preview(self):
+        self._preview_seq += 1
+        while not self._preview_results.empty():
+            _seq, _entry_id, _widget, img = self._preview_results.get_nowait()
+            with contextlib.suppress(Exception):
+                img.close()
         if self._preview_after_id:
             try:
                 self.after_cancel(self._preview_after_id)
@@ -1017,24 +1058,65 @@ class PopupWindow(customtkinter.CTkToplevel):
             except Exception:
                 log.exception("History search failed")
                 page = None
-            self._search_results.put((generation, query, reset, preserve_scroll, page))
+            thumbs = self._decode_page_thumbnails(page)
+            self._search_results.put((generation, query, reset, preserve_scroll, page, thumbs))
+
+    def _decode_page_thumbnails(self, page):
+        """Decode row thumbnails off the UI thread (PIL only, no Tk).
+
+        PhotoImage creation stays on the UI thread in _create_thumbnail.
+        Failures degrade to badge-only rows rather than blocking the page.
+        """
+        if not page:
+            return {}
+        entries, _total = page
+        thumbs = {}
+        for entry in entries:
+            if entry.get("content_type") != "image":
+                continue
+            try:
+                image_data = self.db.get_image_data(entry["id"])
+                if not image_data:
+                    continue
+                img = PILImage.open(io.BytesIO(image_data))
+                decoded = False
+                try:
+                    img.thumbnail(IMAGE_THUMB_SIZE, PILImage.Resampling.LANCZOS)
+                    img.load()
+                    decoded = True
+                finally:
+                    if not decoded:
+                        img.close()
+                thumbs[entry["id"]] = img
+            except Exception:
+                log.debug("Page thumbnail decode failed for entry %s", entry.get("id"),
+                          exc_info=True)
+        return thumbs
 
     def _poll_search_results(self):
         self._search_poll_after_id = None
         while True:
             try:
-                generation, query, reset, preserve_scroll, page = self._search_results.get_nowait()
+                generation, query, reset, preserve_scroll, page, thumbs = self._search_results.get_nowait()
             except queue.Empty:
                 break
             if not self._visible or generation != self._search_generation:
+                self._close_dropped_thumbs(thumbs)
                 continue
             self._search_pending = False
             if page is not None:
-                self._load_items(query, reset=reset, preserve_scroll=preserve_scroll, page=page)
+                self._load_items(query, reset=reset, preserve_scroll=preserve_scroll,
+                                 page=page, thumbs=thumbs)
             else:
                 self._load_items(query, reset=reset, page=([], 0), search_error=True)
         if self._visible and self._search_pending:
             self._search_poll_after_id = self.after(30, self._poll_search_results)
+
+    @staticmethod
+    def _close_dropped_thumbs(thumbs):
+        for img in (thumbs or {}).values():
+            with contextlib.suppress(Exception):
+                img.close()
 
     def _ensure_current_search(self):
         """Refresh stale rows and cancel the action that targeted their old selection."""
@@ -1171,20 +1253,23 @@ class PopupWindow(customtkinter.CTkToplevel):
                 entry_id,
                 start_result.reason,
             )
-            self._schedule_paste_notice(start_result.clipboard_set)
+            self._schedule_paste_notice(start_result.clipboard_set, start_result.reason)
 
-    def _schedule_paste_notice(self, clipboard_set):
+    def _schedule_paste_notice(self, clipboard_set, reason=None):
         try:
-            self.after(0, lambda: self._notify_paste_result(clipboard_set))
+            self.after(0, lambda: self._notify_paste_result(clipboard_set, reason))
         except Exception:
             log.exception("Failed to schedule paste notice")
 
-    def _notify_paste_result(self, clipboard_set):
+    def _notify_paste_result(self, clipboard_set, reason=None):
         if self.on_notice:
-            message = (
-                "Copied to clipboard; automatic paste cancelled"
-                if clipboard_set else "Could not copy to clipboard"
-            )
+            if not clipboard_set:
+                message = "Could not copy to clipboard"
+            elif reason == "clipboard_changed":
+                # Proven by the worker: our item is no longer on the clipboard.
+                message = "Clipboard changed during paste; automatic paste cancelled"
+            else:
+                message = "Copied to clipboard; automatic paste cancelled"
             self.on_notice(message)
 
     def _schedule_paste_completion(self, entry_id, completion):
@@ -1204,19 +1289,19 @@ class PopupWindow(customtkinter.CTkToplevel):
                 completion.expected_input_count,
                 completion.reason,
             )
-            self._notify_paste_result(True)
+            self._notify_paste_result(True, completion.reason)
 
     def _toggle_pin(self, entry_id):
         if not self._ensure_current_search():
             return
         self.db.toggle_pin(entry_id)
-        self._request_search(self._current_search_query)
+        self._request_search(self._current_search_query, preserve_scroll=True)
 
     def _delete_item(self, entry_id):
         if not self._ensure_current_search():
             return
         self.db.delete_entry(entry_id)
-        self._request_search(self._current_search_query)
+        self._request_search(self._current_search_query, preserve_scroll=True)
 
     def _clear_unpinned(self):
         self._confirm_clear_action(CLEAR_UNPINNED_ACTION)
@@ -1226,9 +1311,18 @@ class PopupWindow(customtkinter.CTkToplevel):
 
     def _confirm_clear_action(self, action):
         if self._pending_clear_action == action:
-            self._run_clear_action(action)
-            self._reset_clear_confirm(force=True)
-            self._request_search(self._current_search_query)
+            if self._clear_pending:
+                return
+            self._clear_pending = True
+            self._set_clear_buttons_busy(action)
+            try:
+                self._work_thread_factory(
+                    target=self._run_clear_worker, args=(action,), daemon=True,
+                ).start()
+            except (RuntimeError, OSError):
+                log.exception("Failed to start clear worker, clearing inline")
+                self._run_clear_worker(action)
+                self._on_clear_done()
             return
 
         self._pending_clear_action = action
@@ -1239,6 +1333,37 @@ class PopupWindow(customtkinter.CTkToplevel):
         except Exception:
             log.debug("Failed to schedule clear confirmation reset", exc_info=True)
             self._clear_reset_after_id = None
+
+    def _set_clear_buttons_busy(self, action):
+        label = "Clearing…" if action == CLEAR_UNPINNED_ACTION else "Deleting…"
+        button = self._clear_unpinned_btn if action == CLEAR_UNPINNED_ACTION else self._delete_all_btn
+        if button:
+            try:
+                button.configure(text=label, text_color=TEXT_SECONDARY)
+            except Exception:
+                pass
+
+    def _run_clear_worker(self, action):
+        try:
+            deleted = self._run_clear_action(action)
+        except Exception:
+            log.exception("Clear history action failed")
+            deleted = 0
+        self._clear_results.put((action, deleted))
+        try:
+            self.event_generate("<<ClearDone>>", when="tail")
+        except Exception:
+            log.exception("Failed to signal clear completion")
+
+    def _on_clear_done(self, _event=None):
+        while True:
+            try:
+                self._clear_results.get_nowait()
+            except queue.Empty:
+                break
+        self._clear_pending = False
+        self._reset_clear_confirm(force=True)
+        self._request_search(self._current_search_query)
 
     def _run_clear_action(self, action):
         if action == CLEAR_UNPINNED_ACTION:
@@ -1295,8 +1420,15 @@ class PopupWindow(customtkinter.CTkToplevel):
         if not self._visible:
             return
         if self._focus_check_id is not None:
-            self.after_cancel(self._focus_check_id)
-        self._focus_check_id = self.after(80, lambda: self._check_focus(0))
+            try:
+                self.after_cancel(self._focus_check_id)
+            except (RuntimeError, tk.TclError):
+                pass
+        try:
+            self._focus_check_id = self.after(80, lambda: self._check_focus(0))
+        except (RuntimeError, tk.TclError):
+            log.debug("Failed to schedule focus check", exc_info=True)
+            self._focus_check_id = None
 
     @staticmethod
     def _get_tk_hwnd(widget):
@@ -1330,7 +1462,11 @@ class PopupWindow(customtkinter.CTkToplevel):
                 if preview_hwnd and foreground == preview_hwnd:
                     return
             if attempt < 1:
-                self._focus_check_id = self.after(80, lambda: self._check_focus(attempt + 1))
+                try:
+                    self._focus_check_id = self.after(80, lambda: self._check_focus(attempt + 1))
+                except (RuntimeError, tk.TclError):
+                    log.debug("Failed to schedule focus recheck", exc_info=True)
+                    self._focus_check_id = None
                 return
             self.close()
         except Exception:

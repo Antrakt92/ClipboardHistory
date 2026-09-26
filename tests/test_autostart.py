@@ -97,6 +97,20 @@ class AutostartTests(unittest.TestCase):
             ):
                 self.assertFalse(autostart.is_autostart_enabled())
 
+    def test_orphaned_stamp_with_existing_launcher_reports_enabled(self):
+        key = FakeKey()
+        with tempfile.TemporaryDirectory() as directory:
+            launcher = Path(directory) / "ClipboardHistory.exe"
+            launcher.write_bytes(b"synthetic launcher")
+            command = autostart._build_autostart_command(launcher=str(launcher))
+            with (
+                mock.patch.object(autostart.winreg, "OpenKey", return_value=key),
+                mock.patch.object(autostart.winreg, "QueryValueEx", return_value=(command, autostart.winreg.REG_SZ)),
+                mock.patch.object(autostart, "launcher_path", return_value=launcher),
+            ):
+                with self.assertLogs("app.autostart", level="WARNING"):
+                    self.assertTrue(autostart.is_autostart_enabled())
+
     def test_is_autostart_enabled_rejects_missing_stale_error_and_non_string_values(self):
         key = FakeKey()
         expected_python = r"C:\Python\pythonw.exe"

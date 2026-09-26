@@ -249,11 +249,11 @@ class FakePopup:
     def _start_paste(self, *args):
         return PopupWindow._start_paste(self, *args)
 
-    def _schedule_paste_notice(self, clipboard_set):
-        return PopupWindow._schedule_paste_notice(self, clipboard_set)
+    def _schedule_paste_notice(self, clipboard_set, reason=None):
+        return PopupWindow._schedule_paste_notice(self, clipboard_set, reason)
 
-    def _notify_paste_result(self, clipboard_set):
-        return PopupWindow._notify_paste_result(self, clipboard_set)
+    def _notify_paste_result(self, clipboard_set, reason=None):
+        return PopupWindow._notify_paste_result(self, clipboard_set, reason)
 
 
 class FakeStatusLabel:
@@ -357,6 +357,8 @@ class FakeClearPopup:
         self._visible = True
         self._pending_clear_action = None
         self._clear_reset_after_id = None
+        self._clear_pending = False
+        self._clear_results = queue.Queue()
         self._clear_unpinned_btn = FakeClearButton(CLEAR_UNPINNED_LABEL)
         self._delete_all_btn = FakeClearButton(DELETE_ALL_LABEL)
         self.db = FakeClearDatabase()
@@ -364,6 +366,8 @@ class FakeClearPopup:
         self.after_cancelled = []
         self.load_calls = []
         self._current_search_query = None
+        self._work_thread_factory = ImmediateClearThread
+        self.generated_events = []
 
     def after(self, delay, callback):
         after_id = f"after-{len(self.after_callbacks) + 1}"
@@ -372,6 +376,11 @@ class FakeClearPopup:
 
     def after_cancel(self, after_id):
         self.after_cancelled.append(after_id)
+
+    def event_generate(self, name, when="tail"):
+        self.generated_events.append((name, when))
+        if name == "<<ClearDone>>":
+            self._on_clear_done()
 
     def _request_search(self, query, reset=False):
         self.load_calls.append((query, reset))
@@ -387,6 +396,42 @@ class FakeClearPopup:
 
     def _reset_clear_confirm(self, force=False):
         return PopupWindow._reset_clear_confirm(self, force=force)
+
+    def _set_clear_buttons_busy(self, action):
+        return PopupWindow._set_clear_buttons_busy(self, action)
+
+    def _run_clear_worker(self, action):
+        return PopupWindow._run_clear_worker(self, action)
+
+    def _on_clear_done(self, _event=None):
+        return PopupWindow._on_clear_done(self, _event)
+
+
+class ImmediateClearThread:
+    """Synchronous stand-in for the clear worker factory."""
+
+    def __init__(self, target, args=(), daemon=None):
+        self._target = target
+        self._args = args
+        self.daemon = daemon
+
+    def start(self):
+        self._target(*self._args)
+
+
+class DeferredClearThread:
+    """Records the clear worker without running it (pending stays True)."""
+
+    instances = []
+
+    def __init__(self, target, args=(), daemon=None):
+        self._target = target
+        self._args = args
+        self.daemon = daemon
+        DeferredClearThread.instances.append(self)
+
+    def start(self):
+        pass
 
 
 class PopupClearActionTests(unittest.TestCase):
@@ -443,6 +488,19 @@ class PopupClearActionTests(unittest.TestCase):
         self.assertEqual(DELETE_ALL_LABEL, popup._delete_all_btn.text)
         self.assertEqual(TEXT_SECONDARY, popup._delete_all_btn.text_color)
 
+    def test_second_confirm_while_clear_pending_is_ignored(self):
+        DeferredClearThread.instances.clear()
+        popup = FakeClearPopup()
+        popup._work_thread_factory = DeferredClearThread
+
+        PopupWindow._confirm_clear_action(popup, CLEAR_UNPINNED_ACTION)
+        PopupWindow._confirm_clear_action(popup, CLEAR_UNPINNED_ACTION)
+
+        self.assertEqual(1, len(DeferredClearThread.instances))
+        self.assertEqual(0, popup.db.clear_unpinned_calls)
+        self.assertEqual("Clearing…", popup._clear_unpinned_btn.text)
+        self.assertEqual([], popup.load_calls)
+
 
 class PopupPasteActionTests(unittest.TestCase):
     def test_item_click_does_not_touch_entry_immediately(self):
@@ -493,6 +551,18 @@ class PopupPasteActionTests(unittest.TestCase):
 
         self.assertEqual([], popup.db.touched)
         self.assertEqual(["Copied to clipboard; automatic paste cancelled"], popup.notices)
+
+    def test_cancel_notice_names_clipboard_change(self):
+        popup = FakePopup(FakePasteEngine())
+        popup._notify_paste_result(True, "clipboard_changed")
+        popup._notify_paste_result(True, "modifiers_held")
+        popup._notify_paste_result(False, "clipboard_changed")
+        self.assertEqual(
+            ["Clipboard changed during paste; automatic paste cancelled",
+             "Copied to clipboard; automatic paste cancelled",
+             "Could not copy to clipboard"],
+            popup.notices,
+        )
 
     def test_image_conversion_starts_only_on_worker(self):
         paste_engine = FakePasteEngine()
@@ -573,7 +643,7 @@ class PopupSearchSafetyTests(unittest.TestCase):
         popup._poll_search_results()
         popup.db.search_history_page.assert_called_once_with(limit=HISTORY_PAGE_SIZE, search_query="новый")
         popup._load_items.assert_called_once_with(
-            "новый", reset=True, preserve_scroll=False, page=([{"id": "новый"}], 1)
+            "новый", reset=True, preserve_scroll=False, page=([{"id": "новый"}], 1), thumbs={},
         )
         self.assertFalse(popup._search_pending)
 
@@ -591,7 +661,7 @@ class PopupSearchSafetyTests(unittest.TestCase):
         popup._poll_search_results()
         self.assertEqual(["old", "new"], [call.kwargs["search_query"] for call in popup.db.search_history_page.call_args_list])
         popup._load_items.assert_called_once_with(
-            "new", reset=True, preserve_scroll=False, page=([{"id": "new"}], 1)
+            "new", reset=True, preserve_scroll=False, page=([{"id": "new"}], 1), thumbs={},
         )
 
     def test_closed_generation_never_renders_after_reopen(self):
@@ -646,6 +716,23 @@ class PopupSearchSafetyTests(unittest.TestCase):
                 popup.db.get_history_count.assert_not_called()
                 popup.db.get_history.assert_not_called()
                 self.assertEqual(HISTORY_PAGE_SIZE, popup._loaded_limit)
+
+    def test_search_worker_decodes_page_thumbnails_off_ui_thread(self):
+        from PIL import Image as TestPILImage
+        buf = io.BytesIO()
+        TestPILImage.new("RGB", (64, 64), (0, 0, 255)).save(buf, format="PNG")
+        popup, workers = self.make_async_popup()
+        entries = [{"id": 1, "content_type": "image"}, {"id": 2, "content_type": "text"}]
+        popup.db.search_history_page.side_effect = lambda limit, search_query: (entries, 2)
+        popup.db.get_image_data = mock.Mock(return_value=buf.getvalue())
+        popup._request_search(None, reset=True)
+        workers[0].target()
+        popup._poll_search_results()
+        thumbs = popup._load_items.call_args.kwargs["thumbs"]
+        self.assertEqual({1}, set(thumbs))
+        self.assertLessEqual(thumbs[1].size[0], 64)
+        self.assertLessEqual(thumbs[1].size[1], 64)
+        popup.db.get_image_data.assert_called_once_with(1)
 
     def make_popup(self, query="", loaded_query=None):
         popup = object.__new__(PopupWindow)
@@ -702,6 +789,22 @@ class PopupSearchSafetyTests(unittest.TestCase):
         popup._paste_selected()
         popup._on_item_click.assert_called_once_with(1)
         popup._request_search.assert_not_called()
+
+    def test_pin_and_delete_preserve_scroll_position(self):
+        for action, _db_method in (("_toggle_pin", "toggle_pin"), ("_delete_item", "delete_entry")):
+            with self.subTest(action=action):
+                popup = object.__new__(PopupWindow)
+                popup._visible = True
+                popup._current_search_query = "current"
+                popup._search_requested_query = "current"
+                popup._search_pending = False
+                popup._search_after_id = None
+                popup.search_entry = mock.Mock()
+                popup.search_entry.get.return_value = "current"
+                popup.db = mock.Mock()
+                popup._request_search = mock.Mock()
+                getattr(PopupWindow, action)(popup, 1)
+                popup._request_search.assert_called_once_with("current", preserve_scroll=True)
 
 
 class PopupPerfRobustnessTests(unittest.TestCase):
@@ -800,19 +903,47 @@ class PopupPerfRobustnessTests(unittest.TestCase):
         TestPILImage.new("RGB", (4, 4), (255, 0, 0)).save(buf, format="PNG")
         popup = object.__new__(PopupWindow)
         popup._visible = True
+        popup._preview_seq = 3
+        popup._preview_results = queue.Queue()
         popup.db = mock.Mock()
         popup.db.get_image_data.return_value = buf.getvalue()
-        scheduled = []
-        popup.after = lambda delay, cb: scheduled.append((delay, cb)) or "id"
+        generated = []
+        popup.event_generate = lambda name, when="tail": generated.append((name, when))
         popup._render_image_preview = mock.Mock()
-        PopupWindow._load_image_preview(popup, 7, mock.Mock())
-        self.assertEqual(1, len(scheduled))
-        self.assertEqual(0, scheduled[0][0])
-        delay_cb = scheduled[0][1]
-        delay_cb()
+        PopupWindow._load_image_preview(popup, 7, mock.Mock(), 3)
+        self.assertEqual([("<<ImagePreviewReady>>", "tail")], generated)
+        popup._on_preview_ready()
         rendered = popup._render_image_preview.call_args
         self.assertEqual(7, rendered.args[0])
         self.assertIsNotNone(rendered.args[2])
+
+    def test_stale_preview_result_is_dropped_without_render(self):
+        img = mock.Mock()
+        popup = object.__new__(PopupWindow)
+        popup._visible = True
+        popup._preview_seq = 4
+        popup._preview_results = queue.Queue()
+        popup._preview_results.put((3, 7, mock.Mock(), img))
+        popup._render_image_preview = mock.Mock()
+        popup._on_preview_ready()
+        popup._render_image_preview.assert_not_called()
+        img.close.assert_called_once_with()
+
+    def test_thumbnail_from_decoded_image_needs_no_db_read(self):
+        from PIL import Image as TestPILImage
+        popup = object.__new__(PopupWindow)
+        popup._thumb_cache = {}
+        popup.db = mock.Mock()
+        pil_thumb = TestPILImage.new("RGB", (8, 8), (0, 255, 0))
+        with (
+            mock.patch("app.popup_window.ImageTk.PhotoImage", return_value="tk-image") as photo,
+            mock.patch("app.popup_window.tk.Label", return_value=mock.Mock()) as label,
+        ):
+            result = PopupWindow._create_thumbnail(popup, mock.Mock(), 9, "#000", None, pil_thumb)
+        photo.assert_called_once_with(pil_thumb)
+        self.assertEqual("tk-image", popup._thumb_cache[9])
+        popup.db.get_image_data.assert_not_called()
+        self.assertIsNotNone(result)
 
     def test_failed_completion_logs_cancel_reason(self):
         paste_engine = FakePasteEngine()

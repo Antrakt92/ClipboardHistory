@@ -886,7 +886,7 @@ class DatabaseTests(unittest.TestCase):
             finally:
                 db.close()
 
-    def test_search_returns_empty_page_when_read_connection_fails(self):
+    def test_search_reports_failure_instead_of_empty_page(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db = Database(os.path.join(temp_dir, "history.db"))
             try:
@@ -895,12 +895,12 @@ class DatabaseTests(unittest.TestCase):
                     "app.database.sqlite3.connect",
                     side_effect=sqlite3.OperationalError("synthetic close race"),
                 ):
-                    self.assertEqual(([], 0), db.search_history_page(search_query="synthetic"))
+                    self.assertIsNone(db.search_history_page(search_query="synthetic"))
                 with mock.patch.object(
                     Database, "_query_history_page",
                     side_effect=sqlite3.OperationalError("synthetic read race"),
                 ):
-                    self.assertEqual(([], 0), db.search_history_page(search_query="synthetic"))
+                    self.assertIsNone(db.search_history_page(search_query="synthetic"))
             finally:
                 db.close()
             self.assertEqual(([], 0), db.search_history_page(search_query="synthetic"))

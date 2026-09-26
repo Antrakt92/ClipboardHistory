@@ -155,6 +155,47 @@ class ApplicationStartupTests(unittest.TestCase):
             replacements["ClipboardMonitor"].call_args.kwargs["excluded_processes"],
         )
 
+    def test_tray_open_retries_failed_hotkey_registration(self):
+        app = self.app_class.__new__(self.app_class)
+        app.root = mock.Mock()
+        app._ui_running = True
+        app.show_popup = mock.Mock()
+        app._clear_runtime_issue = mock.Mock()
+        old = mock.Mock()
+        old.error_message = "Ctrl+Shift+V hotkey could not be registered"
+        app.hotkey = old
+        fresh = mock.Mock()
+        fresh.wait_ready.return_value = True
+        with (
+            mock.patch.dict(self.namespace, {"HotkeyManager": mock.Mock(return_value=fresh)}),
+            mock.patch.object(self.namespace["ctypes"].windll.user32, "GetForegroundWindow", return_value=123),
+        ):
+            app._show_popup_from_tray()
+
+        fresh.start.assert_called_once()
+        self.assertIs(app.hotkey, fresh)
+        app._clear_runtime_issue.assert_called_once_with("hotkey")
+
+    def test_tray_open_keeps_working_hotkey(self):
+        app = self.app_class.__new__(self.app_class)
+        app.root = mock.Mock()
+        app._ui_running = True
+        app.show_popup = mock.Mock()
+        app._clear_runtime_issue = mock.Mock()
+        healthy = mock.Mock()
+        healthy.error_message = None
+        app.hotkey = healthy
+        factory = mock.Mock()
+        with (
+            mock.patch.dict(self.namespace, {"HotkeyManager": factory}),
+            mock.patch.object(self.namespace["ctypes"].windll.user32, "GetForegroundWindow", return_value=123),
+        ):
+            app._show_popup_from_tray()
+
+        factory.assert_not_called()
+        self.assertIs(app.hotkey, healthy)
+        app._clear_runtime_issue.assert_not_called()
+
     def test_invalid_privacy_settings_stop_before_monitor_starts(self):
         root = mock.Mock()
         monitor = mock.Mock()

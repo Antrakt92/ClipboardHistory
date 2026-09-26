@@ -52,12 +52,16 @@ class FakeMonitor:
     def __init__(self):
         self.set_calls = 0
         self.clear_calls = 0
+        self.own_sequences = []
 
     def set_ignore_next(self):
         self.set_calls += 1
 
     def clear_ignore(self):
         self.clear_calls += 1
+
+    def set_own_sequence(self, sequence):
+        self.own_sequences.append(sequence)
 
 
 class StubPasteEngine(PasteEngine):
@@ -218,8 +222,8 @@ class PasteEngineTests(unittest.TestCase):
         self.assertEqual(78, result.sequence)
         self.assertEqual(["open", "write", "close", "open", "read", "sequence", "close"], events)
 
-    def test_readback_mismatch_or_busy_aborts_without_clearing_write_suppression(self):
-        for readable, size in ((True, 20), (False, 20), (True, 1_000_000)):
+    def test_readback_mismatch_clears_suppression_but_busy_does_not(self):
+        for readable, size, cleared in ((True, 20, 1), (False, 20, 0), (True, 1_000_000, 0)):
             with self.subTest(readable=readable, size=size):
                 threads = SyncThreadFactory()
                 monitor = FakeMonitor()
@@ -240,7 +244,7 @@ class PasteEngineTests(unittest.TestCase):
                 self.assertFalse(result.started)
                 self.assertEqual("clipboard_verification_failed", result.reason)
                 self.assertEqual(1, monitor.set_calls)
-                self.assertEqual(0, monitor.clear_calls)
+                self.assertEqual(cleared, monitor.clear_calls)
                 self.assertEqual([], threads.created)
                 if not readable or size > 100_000:
                     read.assert_not_called()
@@ -256,8 +260,9 @@ class PasteEngineTests(unittest.TestCase):
             mock.patch.object(paste_engine.user32, "GetClipboardSequenceNumber", return_value=77),
             mock.patch.object(paste_engine.win32clipboard, "CloseClipboard") as close,
         ):
-            sequence = PasteEngine._capture_written_sequence(paste_engine.win32clipboard.CF_UNICODETEXT, "fixture")
+            sequence, foreign = PasteEngine._capture_written_sequence(paste_engine.win32clipboard.CF_UNICODETEXT, "fixture")
         self.assertEqual(77, sequence)
+        self.assertFalse(foreign)
         sleep.assert_called_once_with(0.025)
         close.assert_called_once()
 
@@ -542,6 +547,60 @@ class PasteEngineTests(unittest.TestCase):
             engine.paste("hello", on_complete=fail_callback)
 
         self.assertIn("Paste completion callback failed", "\n".join(logs.output))
+
+    def test_final_gate_aborts_on_late_focus_change(self):
+        fake_user32 = FakeUser32(send_count=4)
+        fake_user32.GetForegroundWindow = mock.Mock(side_effect=[100, 200])
+        fake_user32.GetClipboardSequenceNumber = mock.Mock(return_value=77)
+        with (
+            mock.patch.object(paste_engine, "user32", fake_user32),
+            mock.patch.object(paste_engine.time, "sleep"),
+        ):
+            completion = PasteEngine()._focus_and_press(100, expected_sequence=77)
+
+        self.assertFalse(completion.success)
+        self.assertEqual(0, completion.send_input_count)
+        self.assertEqual(0, fake_user32.send_calls)
+        self.assertEqual("focus_changed", completion.reason)
+
+    def test_final_gate_aborts_on_late_clipboard_change(self):
+        fake_user32 = FakeUser32(send_count=4)
+        fake_user32.GetClipboardSequenceNumber = mock.Mock(side_effect=[77, 78])
+        with (
+            mock.patch.object(paste_engine, "user32", fake_user32),
+            mock.patch.object(paste_engine.time, "sleep"),
+        ):
+            completion = PasteEngine()._focus_and_press(100, expected_sequence=77)
+
+        self.assertFalse(completion.success)
+        self.assertEqual(0, completion.send_input_count)
+        self.assertEqual(0, fake_user32.send_calls)
+        self.assertEqual("clipboard_changed", completion.reason)
+
+    def test_image_without_data_aborts_without_wiping_clipboard(self):
+        monitor = FakeMonitor()
+        engine = PasteEngine()
+        with mock.patch.object(paste_engine.win32clipboard, "EmptyClipboard") as empty:
+            result = engine.paste("", content_type="image", image_data=None, monitor=monitor)
+
+        self.assertFalse(result.clipboard_set)
+        self.assertEqual("clipboard_write_failed", result.reason)
+        empty.assert_not_called()
+        self.assertEqual(1, monitor.clear_calls)
+
+    def test_verified_write_registers_own_sequence(self):
+        threads = SyncThreadFactory()
+        monitor = FakeMonitor()
+        engine = PasteEngine(thread_factory=threads)
+        with (
+            mock.patch.object(engine, "_set_clipboard_text",
+                              return_value=paste_engine.ClipboardWriteResult(True, 77)),
+            mock.patch.object(PasteEngine, "_focus_and_press", return_value=make_completion()),
+        ):
+            result = engine.paste("hello", monitor=monitor)
+
+        self.assertTrue(result.started)
+        self.assertEqual([77], monitor.own_sequences)
 
 
 if __name__ == "__main__":

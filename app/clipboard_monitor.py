@@ -1,3 +1,4 @@
+import collections
 import ctypes
 import ctypes.wintypes
 import io
@@ -20,6 +21,10 @@ CLIPBOARD_BUSY_LOG_INTERVAL = 60
 CLIPBOARD_READ_OK = "ok"
 CLIPBOARD_READ_BUSY = "busy"
 CLIPBOARD_READ_ERROR = "error"
+# Paused, stopped, or superseded: nothing was recorded AND nothing failed.
+# Consumers must leave the read-issue state untouched (unlike OK, which clears
+# it: a pause must not wash away a real busy/error indicator unread).
+CLIPBOARD_READ_SKIPPED = "skipped"
 EXCLUDE_HISTORY_FORMAT = win32clipboard.RegisterClipboardFormat("ExcludeClipboardContentFromMonitorProcessing")
 INCLUDE_HISTORY_FORMAT = win32clipboard.RegisterClipboardFormat("CanIncludeInClipboardHistory")
 
@@ -39,6 +44,8 @@ user32.AddClipboardFormatListener.restype = ctypes.wintypes.BOOL
 user32.RemoveClipboardFormatListener.argtypes = [ctypes.wintypes.HWND]
 user32.RemoveClipboardFormatListener.restype = ctypes.wintypes.BOOL
 user32.GetClipboardOwner.restype = ctypes.wintypes.HWND
+user32.GetClipboardSequenceNumber.argtypes = []
+user32.GetClipboardSequenceNumber.restype = ctypes.wintypes.DWORD
 user32.GetWindowThreadProcessId.argtypes = [ctypes.wintypes.HWND, ctypes.POINTER(ctypes.wintypes.DWORD)]
 user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
 kernel32.OpenProcess.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.DWORD]
@@ -133,6 +140,10 @@ class ClipboardMonitor:
         self._running.set()
         self._ignore_lock = threading.Lock()
         self._ignore_next = False
+        # Verified sequence numbers of our own writes (monotonic; capped).
+        # A notification whose current sequence is listed here is ours even
+        # when several updates coalesce; anything else is foreign content.
+        self._own_sequences = collections.deque(maxlen=8)
         self._hwnd = None
         self._thread_id = None
         self._ready = threading.Event()
@@ -159,28 +170,45 @@ class ClipboardMonitor:
         self._running.clear()
         self._cancel_clipboard_retry()
         self._ready.wait(timeout=1)  # ensure window is created before posting
-        if self._thread_id:
+        thread_id, self._thread_id = self._thread_id, None
+        if thread_id and self._thread.is_alive():
             # Post WM_QUIT to the thread message queue (not a window) so
             # GetMessageW returns 0 and the message loop exits cleanly.
-            user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
+            # The id is cleared first so a later stop() cannot signal a
+            # recycled thread id owned by someone else.
+            user32.PostThreadMessageW(thread_id, WM_QUIT, 0, 0)
         if self._thread.is_alive():
             self._thread.join(timeout)
 
     def set_ignore_next(self):
-        # A foreign update may be waiting on a busy-clipboard retry. Our own
-        # write is about to overwrite it, so read now: this is the last chance
-        # to record it. No pending retry means the clipboard holds already
+        # A foreign update may be waiting on a busy-clipboard retry. Cancel
+        # first (bumping the generation retires the timer), then read: this
+        # is the last chance to record content our own write is about to
+        # overwrite. No pending retry means the clipboard holds already
         # recorded content (or our previous paste), which must NOT be re-read.
         with self._retry_lock:
             retry_pending = self._retry_timer is not None
+        self._cancel_clipboard_retry()
         if retry_pending:
             try:
                 self._read_clipboard_once()
             except Exception:
                 log.debug("Pre-paste foreign clipboard read failed", exc_info=True)
-        self._cancel_clipboard_retry()
         with self._ignore_lock:
             self._ignore_next = True
+
+    def set_own_sequence(self, sequence):
+        """Register a verified sequence number of our own write.
+
+        Afterwards the boolean suppression is redundant: our notification is
+        recognized by sequence even when updates coalesce, while foreign
+        updates arriving later are recorded. A falsy sequence (unverified
+        write) keeps the legacy single-consume suppression.
+        """
+        with self._ignore_lock:
+            if sequence:
+                self._own_sequences.append(sequence)
+                self._ignore_next = False
 
     def clear_ignore(self):
         with self._ignore_lock:
@@ -202,6 +230,7 @@ class ClipboardMonitor:
         if not user32.RegisterClassW(ctypes.byref(wc)):
             self._set_startup_failure("RegisterClassW")
             self._ready.set()
+            self._thread_id = None
             return
         class_registered = True
 
@@ -215,6 +244,7 @@ class ClipboardMonitor:
         if not self._hwnd:
             self._set_startup_failure("CreateWindowExW")
             self._ready.set()
+            self._thread_id = None
             if class_registered:
                 user32.UnregisterClassW(class_name, hinstance)
             return
@@ -224,6 +254,7 @@ class ClipboardMonitor:
             self._ready.set()
             user32.DestroyWindow(self._hwnd)
             self._hwnd = None
+            self._thread_id = None
             if class_registered:
                 user32.UnregisterClassW(class_name, hinstance)
             return
@@ -249,6 +280,7 @@ class ClipboardMonitor:
             self._hwnd = None
         if class_registered:
             user32.UnregisterClassW(class_name, hinstance)
+        self._thread_id = None
 
     def _set_startup_failure(self, operation):
         self.startup_error_code = kernel32.GetLastError()
@@ -264,13 +296,34 @@ class ClipboardMonitor:
     def _wnd_proc(self, hwnd, msg, wparam, lparam):
         if msg == WM_CLIPBOARDUPDATE:
             self._cancel_clipboard_retry()
-            with self._ignore_lock:
-                if self._ignore_next:
-                    self._ignore_next = False
-                    return 0
+            if self._consume_own_update():
+                return 0
             self._read_clipboard()
             return 0
         return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+    def _consume_own_update(self):
+        """True when this notification is our own verified write.
+
+        Sequence match wins (coalesced updates included); the legacy boolean
+        covers the write-to-register window and unverified writes. Anything
+        else is foreign content and must be recorded.
+        """
+        with self._ignore_lock:
+            if self._own_sequences:
+                try:
+                    current = user32.GetClipboardSequenceNumber()
+                except Exception:
+                    current = None
+                if current and current in self._own_sequences:
+                    return True
+            if self._ignore_next:
+                # Residual over-consume window: a second paste armed the flag
+                # while the first write's sequence was still unregistered, and
+                # a foreign update landed in between. Microseconds wide.
+                self._ignore_next = False
+                return True
+            return False
 
     def _read_clipboard(self):
         generation = self._cancel_clipboard_retry()
@@ -282,6 +335,8 @@ class ClipboardMonitor:
             self._clear_clipboard_read_issue()
         elif result == CLIPBOARD_READ_BUSY:
             self._schedule_clipboard_retry(0, expected_generation=generation)
+        elif result == CLIPBOARD_READ_SKIPPED:
+            pass
         else:
             self._report_clipboard_read_error()
 
@@ -289,9 +344,9 @@ class ClipboardMonitor:
         with self._retry_lock:
             generation = self._retry_generation
         if expected_generation is not None and expected_generation != generation:
-            return CLIPBOARD_READ_OK
+            return CLIPBOARD_READ_SKIPPED
         if not self._running.is_set() or not self._should_record():
-            return CLIPBOARD_READ_OK
+            return CLIPBOARD_READ_SKIPPED
         opened = False
         try:
             if not self._try_open_clipboard():
@@ -336,7 +391,7 @@ class ClipboardMonitor:
                 return CLIPBOARD_READ_OK
             with self._retry_lock:
                 if generation != self._retry_generation:
-                    return CLIPBOARD_READ_OK
+                    return CLIPBOARD_READ_SKIPPED
             captured = None
             if text_content:
                 captured = (text_content, "text")
@@ -416,6 +471,8 @@ class ClipboardMonitor:
             self._clear_clipboard_read_issue()
         elif result == CLIPBOARD_READ_BUSY:
             self._schedule_clipboard_retry(retry_index, expected_generation=generation)
+        elif result == CLIPBOARD_READ_SKIPPED:
+            pass
         else:
             self._report_clipboard_read_error()
 

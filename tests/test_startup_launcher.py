@@ -37,8 +37,8 @@ class StartupLauncherTests(unittest.TestCase):
             field = r"\StringFileInfo\%04x%04x\FileDescription" % (language, codepage)
             self.assertEqual(win32api.GetFileVersionInfo(launcher, field), "ClipboardHistory")
             version = win32api.GetFileVersionInfo(launcher, "\\")
-            self.assertEqual(version["FileVersionMS"], (1 << 16) | 0)
-            self.assertEqual(version["FileVersionLS"], (2 << 16) | 0)
+            self.assertEqual(version["FileVersionMS"], (1 << 16) | 1)
+            self.assertEqual(version["FileVersionLS"], (0 << 16) | 0)
             large, small = win32gui.ExtractIconEx(launcher, 0, 1)
             self.assertTrue(large and small)
             for handle in large + small:

@@ -226,6 +226,7 @@ class ClipboardHistoryApp:
                 self.root, self.db, self.paste_engine, self.monitor,
                 on_notice=self._notify_paste_status,
             )
+            log.debug("History popup created (single instance)")
             self._refresh_status_ui()
         if self.popup.is_visible:
             self.popup.focus()

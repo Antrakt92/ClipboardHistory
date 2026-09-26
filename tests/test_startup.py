@@ -176,6 +176,50 @@ class ApplicationStartupTests(unittest.TestCase):
         self.assertIs(app.hotkey, fresh)
         app._clear_runtime_issue.assert_called_once_with("hotkey")
 
+    def test_rapid_repeated_show_creates_single_popup(self):
+        created = []
+
+        class SinglePopup:
+            def __init__(self, *args, **kwargs):
+                created.append(1)
+                self._visible = False
+                self.shows = 0
+
+            @property
+            def is_visible(self):
+                return self._visible
+
+            def show(self, prev_hwnd=None):
+                self._visible = True
+                self.shows += 1
+
+            def focus(self):
+                self.shows += 1
+
+            def set_status_snapshot(self, snapshot, recording_paused=False):
+                pass
+
+        app = self.app_class.__new__(self.app_class)
+        app.root = mock.Mock()
+        app._ui_running = True
+        app.popup = None
+        app.db = mock.Mock()
+        app.paste_engine = mock.Mock()
+        app.monitor = mock.Mock()
+        app.status_store = mock.Mock()
+        app.status_store.snapshot.return_value = ()
+        app.recording_state = mock.Mock()
+        app.recording_state.is_paused.return_value = False
+        app.tray = None
+        with mock.patch("app.popup_window.PopupWindow", SinglePopup):
+            for _ in range(50):
+                app.show_popup(123)
+            for _ in range(50):
+                app.show_popup(None)
+
+        self.assertEqual(1, len(created))
+        self.assertEqual(100, app.popup.shows)
+
     def test_tray_open_keeps_working_hotkey(self):
         app = self.app_class.__new__(self.app_class)
         app.root = mock.Mock()

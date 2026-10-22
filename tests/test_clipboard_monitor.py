@@ -667,8 +667,14 @@ class ClipboardMonitorRetryTests(unittest.TestCase):
         self.assertEqual(2, len(timer_factory.timers))
 
         second_timer = timer_factory.timers[1]
+        # This synthetic monitor never starts its native message thread.
+        monitor._ready.set()
         monitor.stop(timeout=0)
         self.assertTrue(second_timer.cancelled)
+        self.assertFalse(monitor._running.is_set())
+        second_timer.callback()
+        self.assertEqual(2, monitor.read_calls)
+        self.assertEqual(2, len(timer_factory.timers))
 
 
 class ClipboardMonitorOwnSequenceTests(unittest.TestCase):
@@ -717,10 +723,33 @@ class ClipboardMonitorOwnSequenceTests(unittest.TestCase):
         monitor._thread_id = 424242
         monitor._thread = mock.Mock()
         monitor._thread.is_alive.return_value = False
+        monitor._ready.set()
         with mock.patch.object(clipboard_monitor.user32, "PostThreadMessageW") as post:
             monitor.stop(timeout=0)
             post.assert_not_called()
         self.assertIsNone(monitor._thread_id)
+        monitor._thread.join.assert_not_called()
+
+    def test_stop_waits_for_startup_before_quitting_and_joining_live_thread(self):
+        monitor = ClipboardMonitor(lambda *_args: None)
+        monitor._thread_id = 424242
+        monitor._thread = mock.Mock()
+        monitor._thread.is_alive.return_value = True
+        monitor._ready = mock.Mock()
+
+        def post_quit(thread_id, message, wparam, lparam):
+            monitor._ready.wait.assert_called_once_with(timeout=1)
+            self.assertIsNone(monitor._thread_id)
+            self.assertFalse(monitor._running.is_set())
+            monitor._thread.join.assert_not_called()
+            self.assertEqual((424242, clipboard_monitor.WM_QUIT, 0, 0),
+                             (thread_id, message, wparam, lparam))
+
+        with mock.patch.object(clipboard_monitor.user32, "PostThreadMessageW",
+                               side_effect=post_quit) as post:
+            monitor.stop(timeout=0.25)
+        post.assert_called_once()
+        monitor._thread.join.assert_called_once_with(0.25)
 
 
 class ClipboardMonitorPrePasteReadTests(unittest.TestCase):

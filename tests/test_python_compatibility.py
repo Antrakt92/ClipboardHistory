@@ -44,6 +44,22 @@ def pep604_annotation_lines(source):
 
 
 class PythonCompatibilityTests(unittest.TestCase):
+    def test_runtime_files_parse_with_python38_grammar(self):
+        for path in RUNTIME_PATHS:
+            with self.subTest(path=str(path.relative_to(ROOT))):
+                ast.parse(path.read_text(encoding="utf-8"), feature_version=(3, 8))
+
+    def test_python38_grammar_rejects_newer_statement_syntax(self):
+        for source in (
+            "match value:\n    case 0:\n        pass\n",
+            "try:\n    pass\nexcept* ValueError:\n    pass\n",
+        ):
+            with self.subTest(source=source), self.assertRaises(SyntaxError):
+                ast.parse(source, feature_version=(3, 8))
+
+    def test_python38_grammar_accepts_assignment_expressions(self):
+        ast.parse("if (value := 1):\n    pass\n", feature_version=(3, 8))
+
     def test_runtime_files_do_not_use_pep604_annotations(self):
         violations = []
         for path in RUNTIME_PATHS:

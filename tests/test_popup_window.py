@@ -935,10 +935,8 @@ class PopupPerfRobustnessTests(unittest.TestCase):
         popup._thumb_cache = {}
         popup.db = mock.Mock()
         pil_thumb = TestPILImage.new("RGB", (8, 8), (0, 255, 0))
-        with (
-            mock.patch("app.popup_window.ImageTk.PhotoImage", return_value="tk-image") as photo,
-            mock.patch("app.popup_window.tk.Label", return_value=mock.Mock()) as label,
-        ):
+        with mock.patch("app.popup_window.ImageTk.PhotoImage", return_value="tk-image") as photo, \
+            mock.patch("app.popup_window.tk.Label", return_value=mock.Mock()) as label:
             result = PopupWindow._create_thumbnail(popup, mock.Mock(), 9, "#000", None, pil_thumb)
         photo.assert_called_once_with(pil_thumb)
         self.assertEqual("tk-image", popup._thumb_cache[9])

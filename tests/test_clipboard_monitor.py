@@ -41,12 +41,10 @@ class ClipboardMonitorImageTests(unittest.TestCase):
     def test_file_drop_is_tagged_as_text_paths_for_clear_popup_label(self):
         callback = mock.Mock()
         monitor = ClipboardMonitor(callback)
-        with (
-            mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
-            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"),
-            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt == 15),
-            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value=(r"C:\synthetic\one.txt", r"C:\synthetic\two.txt")),
-        ):
+        with mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt == 15), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value=(r"C:\synthetic\one.txt", r"C:\synthetic\two.txt")):
             self.assertEqual(CLIPBOARD_READ_OK, monitor._read_clipboard_once())
         callback.assert_called_once_with("C:\\synthetic\\one.txt\nC:\\synthetic\\two.txt", "file_paths")
 
@@ -59,13 +57,11 @@ class ClipboardMonitorImageTests(unittest.TestCase):
             output.value = r"C:\Private Folder\PRIVATEAPP.EXE"
             return 1
 
-        with (
-            mock.patch.object(clipboard_monitor.user32, "GetClipboardOwner", return_value=99),
-            mock.patch.object(clipboard_monitor.user32, "GetWindowThreadProcessId", side_effect=process_id),
-            mock.patch.object(clipboard_monitor.kernel32, "OpenProcess", return_value=456),
-            mock.patch.object(clipboard_monitor.kernel32, "QueryFullProcessImageNameW", side_effect=process_path),
-            mock.patch.object(clipboard_monitor.kernel32, "CloseHandle") as close_handle,
-        ):
+        with mock.patch.object(clipboard_monitor.user32, "GetClipboardOwner", return_value=99), \
+            mock.patch.object(clipboard_monitor.user32, "GetWindowThreadProcessId", side_effect=process_id), \
+            mock.patch.object(clipboard_monitor.kernel32, "OpenProcess", return_value=456), \
+            mock.patch.object(clipboard_monitor.kernel32, "QueryFullProcessImageNameW", side_effect=process_path), \
+            mock.patch.object(clipboard_monitor.kernel32, "CloseHandle") as close_handle:
             self.assertEqual("privateapp.exe", clipboard_monitor._clipboard_owner_process_name())
         close_handle.assert_called_once_with(456)
 
@@ -75,13 +71,11 @@ class ClipboardMonitorImageTests(unittest.TestCase):
             with self.subTest(owner_name=owner_name):
                 callback = mock.Mock()
                 monitor = ClipboardMonitor(callback, excluded_processes=("privateapp.exe",))
-                with (
-                    mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
-                    mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard") as close,
-                    mock.patch.object(clipboard_monitor, "_clipboard_owner_process_name", return_value=owner_name),
-                    mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", return_value=True),
-                    mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData") as get_data,
-                ):
+                with mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"), \
+                    mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard") as close, \
+                    mock.patch.object(clipboard_monitor, "_clipboard_owner_process_name", return_value=owner_name), \
+                    mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", return_value=True), \
+                    mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData") as get_data:
                     self.assertEqual(CLIPBOARD_READ_OK, monitor._read_clipboard_once())
                 callback.assert_not_called()
                 get_data.assert_not_called()
@@ -90,13 +84,11 @@ class ClipboardMonitorImageTests(unittest.TestCase):
     def test_known_allowed_process_is_captured_with_exclusion_policy(self):
         callback = mock.Mock()
         monitor = ClipboardMonitor(callback, excluded_processes=("privateapp.exe",))
-        with (
-            mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
-            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"),
-            mock.patch.object(clipboard_monitor, "_clipboard_owner_process_name", return_value="editor.exe"),
-            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt == clipboard_monitor.win32clipboard.CF_UNICODETEXT),
-            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value="synthetic allowed content"),
-        ):
+        with mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"), \
+            mock.patch.object(clipboard_monitor, "_clipboard_owner_process_name", return_value="editor.exe"), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt == clipboard_monitor.win32clipboard.CF_UNICODETEXT), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value="synthetic allowed content"):
             self.assertEqual(CLIPBOARD_READ_OK, monitor._read_clipboard_once())
         callback.assert_called_once_with("synthetic allowed content", "text")
 
@@ -111,12 +103,10 @@ class ClipboardMonitorImageTests(unittest.TestCase):
                 text_format = clipboard_monitor.win32clipboard.CF_UNICODETEXT
                 callback = mock.Mock()
                 monitor = ClipboardMonitor(callback)
-                with (
-                    mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
-                    mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard") as close,
-                    mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt in (marker, text_format)),
-                    mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", side_effect=lambda fmt: payload if fmt == marker else "synthetic opt-out text") as get_data,
-                ):
+                with mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"), \
+                    mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard") as close, \
+                    mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt in (marker, text_format)), \
+                    mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", side_effect=lambda fmt: payload if fmt == marker else "synthetic opt-out text") as get_data:
                     monitor._read_clipboard_once()
                 callback.assert_not_called()
                 self.assertNotIn(mock.call(text_format), get_data.call_args_list)
@@ -132,22 +122,18 @@ class ClipboardMonitorImageTests(unittest.TestCase):
                 text_format = clipboard_monitor.win32clipboard.CF_UNICODETEXT
                 callback = mock.Mock()
                 monitor = ClipboardMonitor(callback)
-                with (
-                    mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
-                    mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"),
-                    mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt in (marker, text_format)),
-                    mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", side_effect=lambda fmt: payload if fmt == marker else "synthetic history text"),
-                ):
+                with mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"), \
+                    mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"), \
+                    mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt in (marker, text_format)), \
+                    mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", side_effect=lambda fmt: payload if fmt == marker else "synthetic history text"):
                     monitor._read_clipboard_once()
                 callback.assert_called_once_with("synthetic history text", "text")
 
     def test_paused_monitor_does_not_open_or_process_clipboard(self):
         callback = mock.Mock()
         monitor = ClipboardMonitor(callback, should_record=lambda: False)
-        with (
-            mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard") as open_clipboard,
-            mock.patch.object(monitor, "_process_dib_image") as process_image,
-        ):
+        with mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard") as open_clipboard, \
+            mock.patch.object(monitor, "_process_dib_image") as process_image:
             self.assertEqual(CLIPBOARD_READ_SKIPPED, monitor._read_clipboard_once())
         open_clipboard.assert_not_called()
         process_image.assert_not_called()
@@ -156,13 +142,11 @@ class ClipboardMonitorImageTests(unittest.TestCase):
     def test_pause_during_read_skips_image_conversion_and_storage(self):
         callback = mock.Mock()
         monitor = ClipboardMonitor(callback, should_record=mock.Mock(side_effect=[True, False]))
-        with (
-            mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
-            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"),
-            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=[False, False, False, False, True]),
-            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value=make_dib(32, 24)),
-            mock.patch.object(monitor, "_process_dib_image") as process_image,
-        ):
+        with mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=[False, False, False, False, True]), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value=make_dib(32, 24)), \
+            mock.patch.object(monitor, "_process_dib_image") as process_image:
             self.assertEqual(CLIPBOARD_READ_OK, monitor._read_clipboard_once())
         process_image.assert_not_called()
         callback.assert_not_called()
@@ -369,10 +353,8 @@ class ClipboardMonitorStartupTests(unittest.TestCase):
             on_status=lambda *args: statuses.append(args),
         )
 
-        with (
-            mock.patch.object(clipboard_monitor, "user32", fake_user32),
-            mock.patch.object(clipboard_monitor, "kernel32", fake_kernel32),
-        ):
+        with mock.patch.object(clipboard_monitor, "user32", fake_user32), \
+            mock.patch.object(clipboard_monitor, "kernel32", fake_kernel32):
             monitor._run()
 
         self.assertTrue(monitor.listener_registered)
@@ -392,11 +374,9 @@ class ClipboardMonitorStartupTests(unittest.TestCase):
             on_status=lambda *args: statuses.append(args),
         )
 
-        with (
-            mock.patch.object(clipboard_monitor, "user32", fake_user32),
-            mock.patch.object(clipboard_monitor, "kernel32", fake_kernel32),
-            self.assertLogs("app.clipboard_monitor", level="ERROR"),
-        ):
+        with mock.patch.object(clipboard_monitor, "user32", fake_user32), \
+            mock.patch.object(clipboard_monitor, "kernel32", fake_kernel32), \
+            self.assertLogs("app.clipboard_monitor", level="ERROR"):
             monitor._run()
 
         self.assertFalse(monitor.listener_registered)
@@ -413,11 +393,9 @@ class ClipboardMonitorStartupTests(unittest.TestCase):
         fake_kernel32 = FakeKernel32(error=8)
         monitor = ClipboardMonitor(on_new_content=lambda content, content_type: None)
 
-        with (
-            mock.patch.object(clipboard_monitor, "user32", fake_user32),
-            mock.patch.object(clipboard_monitor, "kernel32", fake_kernel32),
-            self.assertLogs("app.clipboard_monitor", level="ERROR") as logs,
-        ):
+        with mock.patch.object(clipboard_monitor, "user32", fake_user32), \
+            mock.patch.object(clipboard_monitor, "kernel32", fake_kernel32), \
+            self.assertLogs("app.clipboard_monitor", level="ERROR") as logs:
             monitor._run()
 
         self.assertFalse(monitor.listener_registered)
@@ -434,11 +412,9 @@ class ClipboardMonitorStartupTests(unittest.TestCase):
         fake_kernel32 = FakeKernel32(error=1400)
         monitor = ClipboardMonitor(on_new_content=lambda content, content_type: None)
 
-        with (
-            mock.patch.object(clipboard_monitor, "user32", fake_user32),
-            mock.patch.object(clipboard_monitor, "kernel32", fake_kernel32),
-            self.assertLogs("app.clipboard_monitor", level="ERROR"),
-        ):
+        with mock.patch.object(clipboard_monitor, "user32", fake_user32), \
+            mock.patch.object(clipboard_monitor, "kernel32", fake_kernel32), \
+            self.assertLogs("app.clipboard_monitor", level="ERROR"):
             monitor._run()
 
         self.assertFalse(monitor.listener_registered)
@@ -479,12 +455,10 @@ class ClipboardMonitorRetryTests(unittest.TestCase):
 
         reader = threading.Thread(target=monitor._read_clipboard_once)
         paste = threading.Thread(target=begin_paste)
-        with (
-            mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
-            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"),
-            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt == clipboard_monitor.win32clipboard.CF_UNICODETEXT),
-            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value="synthetic slow-store fixture"),
-        ):
+        with mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=lambda fmt: fmt == clipboard_monitor.win32clipboard.CF_UNICODETEXT), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value="synthetic slow-store fixture"):
             try:
                 reader.start()
                 self.assertTrue(entered.wait(1))
@@ -533,13 +507,11 @@ class ClipboardMonitorRetryTests(unittest.TestCase):
             monitor.set_ignore_next()
             return b"synthetic PNG"
 
-        with (
-            mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"),
-            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"),
-            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=[False, False, False, False, True]),
-            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value=make_dib(32, 24)),
-            mock.patch.object(monitor, "_process_dib_image", side_effect=start_paste),
-        ):
+        with mock.patch.object(clipboard_monitor.win32clipboard, "OpenClipboard"), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "CloseClipboard"), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "IsClipboardFormatAvailable", side_effect=[False, False, False, False, True]), \
+            mock.patch.object(clipboard_monitor.win32clipboard, "GetClipboardData", return_value=make_dib(32, 24)), \
+            mock.patch.object(monitor, "_process_dib_image", side_effect=start_paste):
             monitor._read_clipboard_once()
 
         callback.assert_not_called()
@@ -641,10 +613,8 @@ class ClipboardMonitorRetryTests(unittest.TestCase):
         )
         monitor._last_clipboard_warning = 0
 
-        with (
-            mock.patch.object(clipboard_monitor._time, "time", return_value=1000),
-            self.assertLogs("app.clipboard_monitor", level="WARNING") as logs,
-        ):
+        with mock.patch.object(clipboard_monitor._time, "time", return_value=1000), \
+            self.assertLogs("app.clipboard_monitor", level="WARNING") as logs:
             monitor._schedule_clipboard_retry(len(clipboard_monitor.CLIPBOARD_RETRY_DELAYS))
             monitor._schedule_clipboard_retry(len(clipboard_monitor.CLIPBOARD_RETRY_DELAYS))
 

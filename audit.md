@@ -12,6 +12,19 @@ Purpose: a forward-looking project backlog. Keep only confirmed open bugs, edge 
 
 ## Open findings
 
+### CH-AUDIT-021 - Python 3.8 limits Pillow security updates
+
+Priority: P2.
+
+Python 3.8 resolves Pillow 10.4.0, which has published security advisories;
+current Pillow releases require Python 3.11 or newer. The application's exposure
+to individual advisories has not been assessed. Python 3.8 remains supported,
+but its dependency security limitations should be considered when reviewing
+the minimum Python version and image-handling risks.
+
+Next steps: assess relevant Pillow advisories against the image-handling paths
+and revisit the supported Python versions when deciding how to address the risk.
+
 ### CH-AUDIT-008 - Real GUI and Win32 behavior still needs manual checks
 
 Priority: P3.

@@ -5,13 +5,16 @@
 <p align="center">Search, pin and paste copied text and images on Windows.</p>
 
 <p align="center">
-  <a href="#installation">Installation</a>
+  <a href="#installation">Install from source</a>
   · <a href="docs/REFERENCE.md">Usage and privacy reference</a>
   · <a href="https://github.com/Antrakt92/ClipboardHistory/issues">Report a problem</a>
 </p>
 
 Clipboard History runs in the system tray. Press **Ctrl+Shift+V** to open your
 history, search for an entry and select it to paste into the previous window.
+
+**Requires Python. There is no standalone Windows installer.**
+Follow [Installation](#installation) to run the source on your computer.
 
 ## Features
 

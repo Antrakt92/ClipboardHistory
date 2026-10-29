@@ -17,8 +17,9 @@ Purpose: a forward-looking project backlog. Keep only confirmed open bugs, edge 
 Priority: P2.
 
 Python 3.8 resolves Pillow 10.4.0, which has published security advisories;
-current Pillow releases require Python 3.11 or newer. The application's exposure
-to individual advisories has not been assessed. Python 3.8 remains supported,
+current Pillow releases require Python 3.11 or newer. Clipboard DIB capture
+rejects RLE-compressed bitmaps before decoding to limit the BMP RLE memory
+amplification risk. Other advisory paths remain to be assessed. Python 3.8 remains supported,
 but its dependency security limitations should be considered when reviewing
 the minimum Python version and image-handling risks.
 

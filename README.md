@@ -22,6 +22,8 @@ history, search for an entry and select it to paste into the previous window.
 - Use Up/Down, Enter and Escape to navigate the popup.
 - Keep up to 500 unpinned entries; the default expiry is 30 days.
 
+RLE-compressed clipboard bitmaps are skipped to avoid excessive memory use.
+
 Copied files are stored as **FILE PATHS (text)**. Pasting those entries inserts
 the paths as text; it does not restore a file-copy operation. Text entries retain
 up to 50,000 characters and label longer copies with the stored-prefix length.

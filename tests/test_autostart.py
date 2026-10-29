@@ -77,12 +77,10 @@ class AutostartTests(unittest.TestCase):
         expected_script = r"C:\App\main.pyw"
         command = autostart._build_autostart_command(expected_python, expected_script)
 
-        with (
-            mock.patch.object(autostart.winreg, "OpenKey", return_value=key),
-            mock.patch.object(autostart.winreg, "QueryValueEx", return_value=(command, autostart.winreg.REG_SZ)),
-            mock.patch.object(autostart, "_get_pythonw_path", return_value=expected_python),
-            mock.patch.object(autostart, "SCRIPT_PATH", expected_script),
-        ):
+        with mock.patch.object(autostart.winreg, "OpenKey", return_value=key), \
+            mock.patch.object(autostart.winreg, "QueryValueEx", return_value=(command, autostart.winreg.REG_SZ)), \
+            mock.patch.object(autostart, "_get_pythonw_path", return_value=expected_python), \
+            mock.patch.object(autostart, "SCRIPT_PATH", expected_script):
             self.assertTrue(autostart.is_autostart_enabled())
 
     def test_missing_or_changed_branded_launcher_is_not_reported_enabled(self):
@@ -90,11 +88,9 @@ class AutostartTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             launcher = Path(directory) / "ClipboardHistory.exe"
             command = autostart._build_autostart_command(launcher=str(launcher))
-            with (
-                mock.patch.object(autostart.winreg, "OpenKey", return_value=key),
-                mock.patch.object(autostart.winreg, "QueryValueEx", return_value=(command, autostart.winreg.REG_SZ)),
-                mock.patch.object(autostart, "launcher_path", return_value=launcher),
-            ):
+            with mock.patch.object(autostart.winreg, "OpenKey", return_value=key), \
+                mock.patch.object(autostart.winreg, "QueryValueEx", return_value=(command, autostart.winreg.REG_SZ)), \
+                mock.patch.object(autostart, "launcher_path", return_value=launcher):
                 self.assertFalse(autostart.is_autostart_enabled())
 
     def test_orphaned_stamp_with_existing_launcher_reports_enabled(self):
@@ -103,11 +99,9 @@ class AutostartTests(unittest.TestCase):
             launcher = Path(directory) / "ClipboardHistory.exe"
             launcher.write_bytes(b"synthetic launcher")
             command = autostart._build_autostart_command(launcher=str(launcher))
-            with (
-                mock.patch.object(autostart.winreg, "OpenKey", return_value=key),
-                mock.patch.object(autostart.winreg, "QueryValueEx", return_value=(command, autostart.winreg.REG_SZ)),
-                mock.patch.object(autostart, "launcher_path", return_value=launcher),
-            ):
+            with mock.patch.object(autostart.winreg, "OpenKey", return_value=key), \
+                mock.patch.object(autostart.winreg, "QueryValueEx", return_value=(command, autostart.winreg.REG_SZ)), \
+                mock.patch.object(autostart, "launcher_path", return_value=launcher):
                 with self.assertLogs("app.autostart", level="WARNING"):
                     self.assertTrue(autostart.is_autostart_enabled())
 
@@ -125,21 +119,17 @@ class AutostartTests(unittest.TestCase):
         ]
         for value in cases:
             with self.subTest(value=value):
-                with (
-                    mock.patch.object(autostart.winreg, "OpenKey", return_value=key),
-                    mock.patch.object(autostart.winreg, "QueryValueEx", return_value=value),
-                    mock.patch.object(autostart, "_get_pythonw_path", return_value=expected_python),
-                    mock.patch.object(autostart, "SCRIPT_PATH", expected_script),
-                ):
+                with mock.patch.object(autostart.winreg, "OpenKey", return_value=key), \
+                    mock.patch.object(autostart.winreg, "QueryValueEx", return_value=value), \
+                    mock.patch.object(autostart, "_get_pythonw_path", return_value=expected_python), \
+                    mock.patch.object(autostart, "SCRIPT_PATH", expected_script):
                     self.assertFalse(autostart.is_autostart_enabled())
 
         with mock.patch.object(autostart.winreg, "OpenKey", side_effect=FileNotFoundError):
             self.assertFalse(autostart.is_autostart_enabled())
 
-        with (
-            mock.patch.object(autostart.winreg, "OpenKey", return_value=key),
-            mock.patch.object(autostart.winreg, "QueryValueEx", side_effect=OSError),
-        ):
+        with mock.patch.object(autostart.winreg, "OpenKey", return_value=key), \
+            mock.patch.object(autostart.winreg, "QueryValueEx", side_effect=OSError):
             self.assertFalse(autostart.is_autostart_enabled())
 
     def test_enable_autostart_uses_create_key_and_expected_command(self):
@@ -152,13 +142,11 @@ class AutostartTests(unittest.TestCase):
         def set_value(_key, name, reserved, value_type, value):
             written.update(name=name, reserved=reserved, value_type=value_type, value=value)
 
-        with (
-            mock.patch.object(autostart.winreg, "CreateKey", return_value=key) as create_key,
-            mock.patch.object(autostart.winreg, "SetValueEx", side_effect=set_value),
-            mock.patch.object(autostart, "_get_pythonw_path", return_value=expected_python),
-            mock.patch.object(autostart, "SCRIPT_PATH", expected_script),
-            mock.patch.object(autostart, "ensure_launcher", return_value=expected_launcher),
-        ):
+        with mock.patch.object(autostart.winreg, "CreateKey", return_value=key) as create_key, \
+            mock.patch.object(autostart.winreg, "SetValueEx", side_effect=set_value), \
+            mock.patch.object(autostart, "_get_pythonw_path", return_value=expected_python), \
+            mock.patch.object(autostart, "SCRIPT_PATH", expected_script), \
+            mock.patch.object(autostart, "ensure_launcher", return_value=expected_launcher):
             self.assertTrue(autostart.enable_autostart())
 
         create_key.assert_called_once_with(autostart.winreg.HKEY_CURRENT_USER, AUTOSTART_KEY)
@@ -190,27 +178,21 @@ class AutostartTests(unittest.TestCase):
         with mock.patch.object(autostart.winreg, "OpenKey", side_effect=FileNotFoundError):
             self.assertTrue(autostart.disable_autostart())
 
-        with (
-            mock.patch.object(autostart.winreg, "OpenKey", return_value=key),
-            mock.patch.object(autostart.winreg, "DeleteValue", side_effect=FileNotFoundError),
-        ):
+        with mock.patch.object(autostart.winreg, "OpenKey", return_value=key), \
+            mock.patch.object(autostart.winreg, "DeleteValue", side_effect=FileNotFoundError):
             self.assertTrue(autostart.disable_autostart())
 
     def test_toggle_autostart_returns_result_and_repairs_stale_disabled_state(self):
-        with (
-            mock.patch.object(autostart, "is_autostart_enabled", return_value=True),
-            mock.patch.object(autostart, "disable_autostart", return_value=False) as disable,
-            mock.patch.object(autostart, "enable_autostart") as enable,
-        ):
+        with mock.patch.object(autostart, "is_autostart_enabled", return_value=True), \
+            mock.patch.object(autostart, "disable_autostart", return_value=False) as disable, \
+            mock.patch.object(autostart, "enable_autostart") as enable:
             self.assertFalse(autostart.toggle_autostart())
         disable.assert_called_once()
         enable.assert_not_called()
 
-        with (
-            mock.patch.object(autostart, "is_autostart_enabled", return_value=False),
-            mock.patch.object(autostart, "enable_autostart", return_value=True) as enable,
-            mock.patch.object(autostart, "disable_autostart") as disable,
-        ):
+        with mock.patch.object(autostart, "is_autostart_enabled", return_value=False), \
+            mock.patch.object(autostart, "enable_autostart", return_value=True) as enable, \
+            mock.patch.object(autostart, "disable_autostart") as disable:
             self.assertTrue(autostart.toggle_autostart())
         enable.assert_called_once()
         disable.assert_not_called()

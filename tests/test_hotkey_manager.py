@@ -56,11 +56,9 @@ class HotkeyManagerTests(unittest.TestCase):
             return next(deliveries)
 
         fake_user32.GetMessageW = get_message
-        with (
-            mock.patch.object(hotkey_manager, "user32", fake_user32),
-            mock.patch.object(hotkey_manager, "kernel32", FakeKernel32()),
-            self.assertLogs("app.hotkey_manager", level="ERROR"),
-        ):
+        with mock.patch.object(hotkey_manager, "user32", fake_user32), \
+            mock.patch.object(hotkey_manager, "kernel32", FakeKernel32()), \
+            self.assertLogs("app.hotkey_manager", level="ERROR"):
             manager._run()
 
         self.assertEqual(2, activation.call_count)
@@ -72,10 +70,8 @@ class HotkeyManagerTests(unittest.TestCase):
         fake_user32 = FakeUser32()
         manager = HotkeyManager(on_activate=mock.Mock())
 
-        with (
-            mock.patch.object(hotkey_manager, "user32", fake_user32),
-            mock.patch.object(hotkey_manager, "kernel32", FakeKernel32()),
-        ):
+        with mock.patch.object(hotkey_manager, "user32", fake_user32), \
+            mock.patch.object(hotkey_manager, "kernel32", FakeKernel32()):
             manager.stop(timeout=0)
             manager._run()
 
@@ -94,10 +90,8 @@ class HotkeyManagerTests(unittest.TestCase):
 
         fake_user32.RegisterHotKey = register
         fake_user32.GetMessageW = mock.Mock(return_value=0)
-        with (
-            mock.patch.object(hotkey_manager, "user32", fake_user32),
-            mock.patch.object(hotkey_manager, "kernel32", FakeKernel32()),
-        ):
+        with mock.patch.object(hotkey_manager, "user32", fake_user32), \
+            mock.patch.object(hotkey_manager, "kernel32", FakeKernel32()):
             manager._run()
 
         fake_user32.GetMessageW.assert_not_called()
@@ -110,10 +104,8 @@ class HotkeyManagerTests(unittest.TestCase):
         snapshots = []
         fake_user32.PeekMessageW = mock.Mock(side_effect=lambda *_args: snapshots.append(manager._thread_id))
 
-        with (
-            mock.patch.object(hotkey_manager, "user32", fake_user32),
-            mock.patch.object(hotkey_manager, "kernel32", FakeKernel32()),
-        ):
+        with mock.patch.object(hotkey_manager, "user32", fake_user32), \
+            mock.patch.object(hotkey_manager, "kernel32", FakeKernel32()):
             manager._run()
 
         self.assertEqual([None], snapshots)
@@ -130,10 +122,8 @@ class HotkeyManagerTests(unittest.TestCase):
             return next(deliveries)
 
         fake_user32.GetMessageW = get_message
-        with (
-            mock.patch.object(hotkey_manager, "user32", fake_user32),
-            mock.patch.object(hotkey_manager, "kernel32", FakeKernel32()),
-        ):
+        with mock.patch.object(hotkey_manager, "user32", fake_user32), \
+            mock.patch.object(hotkey_manager, "kernel32", FakeKernel32()):
             manager._run()
 
         self.assertEqual([(None, HOTKEY_ID)], fake_user32.unregister_calls)
@@ -144,11 +134,9 @@ class HotkeyManagerTests(unittest.TestCase):
         fake_user32.GetMessageW = mock.Mock(return_value=-1)
         manager = HotkeyManager(on_activate=mock.Mock())
 
-        with (
-            mock.patch.object(hotkey_manager, "user32", fake_user32),
-            mock.patch.object(hotkey_manager, "kernel32", FakeKernel32(error=6)),
-            self.assertLogs("app.hotkey_manager", level="ERROR"),
-        ):
+        with mock.patch.object(hotkey_manager, "user32", fake_user32), \
+            mock.patch.object(hotkey_manager, "kernel32", FakeKernel32(error=6)), \
+            self.assertLogs("app.hotkey_manager", level="ERROR"):
             manager._run()
 
         self.assertEqual(6, manager.error_code)
@@ -162,10 +150,8 @@ class HotkeyManagerTests(unittest.TestCase):
         running_states = []
         fake_user32.GetMessageW = mock.Mock(side_effect=lambda *_args: running_states.append(manager.registered) or 0)
 
-        with (
-            mock.patch.object(hotkey_manager, "user32", fake_user32),
-            mock.patch.object(hotkey_manager, "kernel32", fake_kernel32),
-        ):
+        with mock.patch.object(hotkey_manager, "user32", fake_user32), \
+            mock.patch.object(hotkey_manager, "kernel32", fake_kernel32):
             manager._run()
 
         self.assertEqual([True], running_states)
@@ -184,11 +170,9 @@ class HotkeyManagerTests(unittest.TestCase):
         fake_kernel32 = FakeKernel32(error=1419)
         manager = HotkeyManager(on_activate=lambda: None)
 
-        with (
-            mock.patch.object(hotkey_manager, "user32", fake_user32),
-            mock.patch.object(hotkey_manager, "kernel32", fake_kernel32),
-            self.assertLogs("app.hotkey_manager", level="WARNING") as logs,
-        ):
+        with mock.patch.object(hotkey_manager, "user32", fake_user32), \
+            mock.patch.object(hotkey_manager, "kernel32", fake_kernel32), \
+            self.assertLogs("app.hotkey_manager", level="WARNING") as logs:
             manager._run()
 
         self.assertFalse(manager.registered)

@@ -118,11 +118,9 @@ class PasteEngineTests(unittest.TestCase):
             with self.subTest(key=key):
                 fake_user32 = FakeUser32(send_count=4)
                 fake_user32.GetAsyncKeyState = lambda vk: 0x8000 if vk == key else 0
-                with (
-                    mock.patch.object(paste_engine, "user32", fake_user32),
-                    mock.patch.object(paste_engine.time, "sleep"),
-                    mock.patch.object(paste_engine.time, "monotonic", side_effect=[0, 1]),
-                ):
+                with mock.patch.object(paste_engine, "user32", fake_user32), \
+                    mock.patch.object(paste_engine.time, "sleep"), \
+                    mock.patch.object(paste_engine.time, "monotonic", side_effect=[0, 1]):
                     completion = PasteEngine()._focus_and_press(100)
                 self.assertFalse(completion.success)
                 self.assertEqual(0, fake_user32.send_calls)
@@ -135,10 +133,8 @@ class PasteEngineTests(unittest.TestCase):
             if delay != 0.15:
                 fake_user32.GetAsyncKeyState.return_value = 0
 
-        with (
-            mock.patch.object(paste_engine, "user32", fake_user32),
-            mock.patch.object(paste_engine.time, "sleep", side_effect=release_keys) as sleep,
-        ):
+        with mock.patch.object(paste_engine, "user32", fake_user32), \
+            mock.patch.object(paste_engine.time, "sleep", side_effect=release_keys) as sleep:
             completion = PasteEngine()._focus_and_press(100)
         self.assertTrue(completion.success)
         self.assertEqual(1, fake_user32.send_calls)
@@ -154,10 +150,8 @@ class PasteEngineTests(unittest.TestCase):
                 fake_user32.GetAsyncKeyState.return_value = 0
                 fake_user32.GetClipboardSequenceNumber.return_value = 78
 
-        with (
-            mock.patch.object(paste_engine, "user32", fake_user32),
-            mock.patch.object(paste_engine.time, "sleep", side_effect=release_and_copy),
-        ):
+        with mock.patch.object(paste_engine, "user32", fake_user32), \
+            mock.patch.object(paste_engine.time, "sleep", side_effect=release_and_copy):
             completion = PasteEngine()._focus_and_press(100, expected_sequence=77)
         self.assertFalse(completion.success)
         self.assertEqual(0, fake_user32.send_calls)
@@ -179,17 +173,15 @@ class PasteEngineTests(unittest.TestCase):
                 state["sequence"] += 1
                 state["closed"] = True
 
-        with (
-            mock.patch.object(paste_engine, "_open_clipboard_retry", return_value=True),
-            mock.patch.object(paste_engine.win32clipboard, "EmptyClipboard"),
-            mock.patch.object(paste_engine.win32clipboard, "SetClipboardData", side_effect=set_data),
-            mock.patch.object(paste_engine.win32clipboard, "CloseClipboard", side_effect=close_clipboard),
-            mock.patch.object(paste_engine.win32clipboard, "IsClipboardFormatAvailable", return_value=True),
-            mock.patch.object(paste_engine.win32clipboard, "GetClipboardDataHandle", return_value=123),
-            mock.patch.object(paste_engine.kernel32, "GlobalSize", side_effect=lambda _handle: len(state["dib"]) + 16),
-            mock.patch.object(paste_engine.win32clipboard, "GetClipboardData", side_effect=lambda _fmt: state["dib"]),
-            mock.patch.object(paste_engine.user32, "GetClipboardSequenceNumber", side_effect=lambda: state["sequence"]),
-        ):
+        with mock.patch.object(paste_engine, "_open_clipboard_retry", return_value=True), \
+            mock.patch.object(paste_engine.win32clipboard, "EmptyClipboard"), \
+            mock.patch.object(paste_engine.win32clipboard, "SetClipboardData", side_effect=set_data), \
+            mock.patch.object(paste_engine.win32clipboard, "CloseClipboard", side_effect=close_clipboard), \
+            mock.patch.object(paste_engine.win32clipboard, "IsClipboardFormatAvailable", return_value=True), \
+            mock.patch.object(paste_engine.win32clipboard, "GetClipboardDataHandle", return_value=123), \
+            mock.patch.object(paste_engine.kernel32, "GlobalSize", side_effect=lambda _handle: len(state["dib"]) + 16), \
+            mock.patch.object(paste_engine.win32clipboard, "GetClipboardData", side_effect=lambda _fmt: state["dib"]), \
+            mock.patch.object(paste_engine.user32, "GetClipboardSequenceNumber", side_effect=lambda: state["sequence"]):
             result = PasteEngine()._set_clipboard_image(png)
 
         self.assertTrue(result.clipboard_set)
@@ -205,17 +197,15 @@ class PasteEngineTests(unittest.TestCase):
                 sequence[0] += 1  # Windows synthesizes formats on the first close.
             events.append("close")
 
-        with (
-            mock.patch.object(paste_engine, "_open_clipboard_retry", side_effect=lambda **kwargs: events.append("open") or True),
-            mock.patch.object(paste_engine.win32clipboard, "EmptyClipboard"),
-            mock.patch.object(paste_engine.win32clipboard, "SetClipboardText", side_effect=lambda *args: events.append("write")),
-            mock.patch.object(paste_engine.win32clipboard, "CloseClipboard", side_effect=close_clipboard),
-            mock.patch.object(paste_engine.win32clipboard, "IsClipboardFormatAvailable", return_value=True),
-            mock.patch.object(paste_engine.win32clipboard, "GetClipboardDataHandle", return_value=123),
-            mock.patch.object(paste_engine.kernel32, "GlobalSize", return_value=100),
-            mock.patch.object(paste_engine.win32clipboard, "GetClipboardData", side_effect=lambda _fmt: events.append("read") or "synthetic fixture"),
-            mock.patch.object(paste_engine.user32, "GetClipboardSequenceNumber", side_effect=lambda: events.append("sequence") or sequence[0]),
-        ):
+        with mock.patch.object(paste_engine, "_open_clipboard_retry", side_effect=lambda **kwargs: events.append("open") or True), \
+            mock.patch.object(paste_engine.win32clipboard, "EmptyClipboard"), \
+            mock.patch.object(paste_engine.win32clipboard, "SetClipboardText", side_effect=lambda *args: events.append("write")), \
+            mock.patch.object(paste_engine.win32clipboard, "CloseClipboard", side_effect=close_clipboard), \
+            mock.patch.object(paste_engine.win32clipboard, "IsClipboardFormatAvailable", return_value=True), \
+            mock.patch.object(paste_engine.win32clipboard, "GetClipboardDataHandle", return_value=123), \
+            mock.patch.object(paste_engine.kernel32, "GlobalSize", return_value=100), \
+            mock.patch.object(paste_engine.win32clipboard, "GetClipboardData", side_effect=lambda _fmt: events.append("read") or "synthetic fixture"), \
+            mock.patch.object(paste_engine.user32, "GetClipboardSequenceNumber", side_effect=lambda: events.append("sequence") or sequence[0]):
             result = PasteEngine()._set_clipboard_text("synthetic fixture")
 
         self.assertTrue(result.clipboard_set)
@@ -228,16 +218,14 @@ class PasteEngineTests(unittest.TestCase):
                 threads = SyncThreadFactory()
                 monitor = FakeMonitor()
                 engine = PasteEngine(thread_factory=threads)
-                with (
-                    mock.patch.object(paste_engine, "_open_clipboard_retry", side_effect=[True, readable]),
-                    mock.patch.object(paste_engine.win32clipboard, "EmptyClipboard"),
-                    mock.patch.object(paste_engine.win32clipboard, "SetClipboardText"),
-                    mock.patch.object(paste_engine.win32clipboard, "CloseClipboard"),
-                    mock.patch.object(paste_engine.win32clipboard, "IsClipboardFormatAvailable", return_value=True),
-                    mock.patch.object(paste_engine.win32clipboard, "GetClipboardDataHandle", return_value=123),
-                    mock.patch.object(paste_engine.kernel32, "GlobalSize", return_value=size),
-                    mock.patch.object(paste_engine.win32clipboard, "GetClipboardData", return_value="replacement fixture") as read,
-                ):
+                with mock.patch.object(paste_engine, "_open_clipboard_retry", side_effect=[True, readable]), \
+                    mock.patch.object(paste_engine.win32clipboard, "EmptyClipboard"), \
+                    mock.patch.object(paste_engine.win32clipboard, "SetClipboardText"), \
+                    mock.patch.object(paste_engine.win32clipboard, "CloseClipboard"), \
+                    mock.patch.object(paste_engine.win32clipboard, "IsClipboardFormatAvailable", return_value=True), \
+                    mock.patch.object(paste_engine.win32clipboard, "GetClipboardDataHandle", return_value=123), \
+                    mock.patch.object(paste_engine.kernel32, "GlobalSize", return_value=size), \
+                    mock.patch.object(paste_engine.win32clipboard, "GetClipboardData", return_value="replacement fixture") as read:
                     result = engine.paste("selected fixture", monitor=monitor)
 
                 self.assertTrue(result.clipboard_set)
@@ -250,16 +238,14 @@ class PasteEngineTests(unittest.TestCase):
                     read.assert_not_called()
 
     def test_readback_retries_a_transient_busy_clipboard(self):
-        with (
-            mock.patch.object(paste_engine.win32clipboard, "OpenClipboard", side_effect=[RuntimeError("busy"), None]),
-            mock.patch.object(paste_engine.time, "sleep") as sleep,
-            mock.patch.object(paste_engine.win32clipboard, "IsClipboardFormatAvailable", return_value=True),
-            mock.patch.object(paste_engine.win32clipboard, "GetClipboardDataHandle", return_value=123),
-            mock.patch.object(paste_engine.kernel32, "GlobalSize", return_value=32),
-            mock.patch.object(paste_engine.win32clipboard, "GetClipboardData", return_value="fixture"),
-            mock.patch.object(paste_engine.user32, "GetClipboardSequenceNumber", return_value=77),
-            mock.patch.object(paste_engine.win32clipboard, "CloseClipboard") as close,
-        ):
+        with mock.patch.object(paste_engine.win32clipboard, "OpenClipboard", side_effect=[RuntimeError("busy"), None]), \
+            mock.patch.object(paste_engine.time, "sleep") as sleep, \
+            mock.patch.object(paste_engine.win32clipboard, "IsClipboardFormatAvailable", return_value=True), \
+            mock.patch.object(paste_engine.win32clipboard, "GetClipboardDataHandle", return_value=123), \
+            mock.patch.object(paste_engine.kernel32, "GlobalSize", return_value=32), \
+            mock.patch.object(paste_engine.win32clipboard, "GetClipboardData", return_value="fixture"), \
+            mock.patch.object(paste_engine.user32, "GetClipboardSequenceNumber", return_value=77), \
+            mock.patch.object(paste_engine.win32clipboard, "CloseClipboard") as close:
             sequence, foreign = PasteEngine._capture_written_sequence(paste_engine.win32clipboard.CF_UNICODETEXT, "fixture")
         self.assertEqual(77, sequence)
         self.assertFalse(foreign)
@@ -269,10 +255,8 @@ class PasteEngineTests(unittest.TestCase):
     def test_unchanged_clipboard_sequence_allows_paste(self):
         fake_user32 = FakeUser32(send_count=4)
         fake_user32.GetClipboardSequenceNumber = mock.Mock(return_value=77)
-        with (
-            mock.patch.object(paste_engine, "user32", fake_user32),
-            mock.patch.object(paste_engine.time, "sleep"),
-        ):
+        with mock.patch.object(paste_engine, "user32", fake_user32), \
+            mock.patch.object(paste_engine.time, "sleep"):
             completion = PasteEngine()._focus_and_press(100, expected_sequence=77)
 
         self.assertTrue(completion.success)
@@ -285,10 +269,8 @@ class PasteEngineTests(unittest.TestCase):
         def change_clipboard(_delay):
             fake_user32.GetClipboardSequenceNumber.return_value = 78
 
-        with (
-            mock.patch.object(paste_engine, "user32", fake_user32),
-            mock.patch.object(paste_engine.time, "sleep", side_effect=change_clipboard),
-        ):
+        with mock.patch.object(paste_engine, "user32", fake_user32), \
+            mock.patch.object(paste_engine.time, "sleep", side_effect=change_clipboard):
             completion = PasteEngine()._focus_and_press(100, expected_sequence=77)
 
         self.assertFalse(completion.success)
@@ -332,10 +314,8 @@ class PasteEngineTests(unittest.TestCase):
         threads = SyncThreadFactory()
         engine = StubPasteEngine(thread_factory=threads)
         paths = "C:\\Synthetic\\one.txt\nC:\\Synthetic\\two.txt"
-        with (
-            mock.patch.object(engine, "_set_clipboard_text", return_value=paste_engine.ClipboardWriteResult(True, 77)) as write,
-            mock.patch.object(engine, "_set_clipboard_image") as image_write,
-        ):
+        with mock.patch.object(engine, "_set_clipboard_text", return_value=paste_engine.ClipboardWriteResult(True, 77)) as write, \
+            mock.patch.object(engine, "_set_clipboard_image") as image_write:
             result = engine.paste(paths, content_type="file_paths", target_hwnd=456)
         self.assertTrue(result.started)
         write.assert_called_once_with(paths)
@@ -346,11 +326,9 @@ class PasteEngineTests(unittest.TestCase):
         fake_kernel32 = FakeKernel32()
         engine = PasteEngine()
 
-        with (
-            mock.patch.object(paste_engine, "user32", fake_user32),
-            mock.patch.object(paste_engine, "kernel32", fake_kernel32),
-            mock.patch.object(paste_engine.time, "sleep"),
-        ):
+        with mock.patch.object(paste_engine, "user32", fake_user32), \
+            mock.patch.object(paste_engine, "kernel32", fake_kernel32), \
+            mock.patch.object(paste_engine.time, "sleep"):
             completion = engine._focus_and_press(100)
 
         self.assertTrue(completion.success)
@@ -365,12 +343,10 @@ class PasteEngineTests(unittest.TestCase):
         fake_kernel32 = FakeKernel32(error=87)
         engine = PasteEngine()
 
-        with (
-            mock.patch.object(paste_engine, "user32", fake_user32),
-            mock.patch.object(paste_engine, "kernel32", fake_kernel32),
-            mock.patch.object(paste_engine.time, "sleep"),
-            self.assertLogs("app.paste_engine", level="WARNING") as logs,
-        ):
+        with mock.patch.object(paste_engine, "user32", fake_user32), \
+            mock.patch.object(paste_engine, "kernel32", fake_kernel32), \
+            mock.patch.object(paste_engine.time, "sleep"), \
+            self.assertLogs("app.paste_engine", level="WARNING") as logs:
             completion = engine._focus_and_press(100)
 
         self.assertFalse(completion.success)
@@ -387,12 +363,10 @@ class PasteEngineTests(unittest.TestCase):
         fake_kernel32 = FakeKernel32(error=5)
         engine = PasteEngine()
 
-        with (
-            mock.patch.object(paste_engine, "user32", fake_user32),
-            mock.patch.object(paste_engine, "kernel32", fake_kernel32),
-            mock.patch.object(paste_engine.time, "sleep"),
-            self.assertLogs("app.paste_engine", level="WARNING") as logs,
-        ):
+        with mock.patch.object(paste_engine, "user32", fake_user32), \
+            mock.patch.object(paste_engine, "kernel32", fake_kernel32), \
+            mock.patch.object(paste_engine.time, "sleep"), \
+            self.assertLogs("app.paste_engine", level="WARNING") as logs:
             completion = engine._focus_and_press(100)
 
         self.assertFalse(completion.success)
@@ -408,10 +382,8 @@ class PasteEngineTests(unittest.TestCase):
         for target in (None, 100):
             with self.subTest(target=target):
                 fake_user32 = FakeUser32(send_count=4, is_window=False)
-                with (
-                    mock.patch.object(paste_engine, "user32", fake_user32),
-                    mock.patch.object(paste_engine.time, "sleep"),
-                ):
+                with mock.patch.object(paste_engine, "user32", fake_user32), \
+                    mock.patch.object(paste_engine.time, "sleep"):
                     completion = PasteEngine()._focus_and_press(target)
                 self.assertFalse(completion.success)
                 self.assertFalse(completion.target_valid)
@@ -423,10 +395,8 @@ class PasteEngineTests(unittest.TestCase):
         def switch_window(_delay):
             fake_user32.foreground = 200
 
-        with (
-            mock.patch.object(paste_engine, "user32", fake_user32),
-            mock.patch.object(paste_engine.time, "sleep", side_effect=switch_window),
-        ):
+        with mock.patch.object(paste_engine, "user32", fake_user32), \
+            mock.patch.object(paste_engine.time, "sleep", side_effect=switch_window):
             completion = PasteEngine()._focus_and_press(100)
 
         self.assertFalse(completion.success)
@@ -439,10 +409,8 @@ class PasteEngineTests(unittest.TestCase):
         # revalidation must abort before SendInput.
         fake_user32 = FakeUser32(send_count=4)
         fake_user32.IsWindow = mock.Mock(side_effect=[True, False])
-        with (
-            mock.patch.object(paste_engine, "user32", fake_user32),
-            mock.patch.object(paste_engine.time, "sleep"),
-        ):
+        with mock.patch.object(paste_engine, "user32", fake_user32), \
+            mock.patch.object(paste_engine.time, "sleep"):
             completion = PasteEngine()._focus_and_press(100)
 
         self.assertFalse(completion.success)
@@ -462,10 +430,8 @@ class PasteEngineTests(unittest.TestCase):
             return 0x8000 if key == 0x10 else 0
 
         fake_user32.GetAsyncKeyState = gaks
-        with (
-            mock.patch.object(paste_engine, "user32", fake_user32),
-            mock.patch.object(paste_engine.time, "sleep"),
-        ):
+        with mock.patch.object(paste_engine, "user32", fake_user32), \
+            mock.patch.object(paste_engine.time, "sleep"):
             completion = PasteEngine()._focus_and_press(100)
 
         self.assertFalse(completion.success)
@@ -484,13 +450,11 @@ class PasteEngineTests(unittest.TestCase):
         image.close()
         png_bytes = small + b"\x00" * (MAX_IMAGE_BYTES + 1 - len(small))
         self.assertEqual(MAX_IMAGE_BYTES + 1, len(png_bytes))
-        with (
-            mock.patch.object(paste_engine, "_open_clipboard_retry") as retry,
-            mock.patch.object(paste_engine.win32clipboard, "EmptyClipboard") as empty,
-            mock.patch.object(paste_engine.win32clipboard, "SetClipboardData"),
-            mock.patch.object(paste_engine.win32clipboard, "CloseClipboard"),
-            mock.patch.object(PasteEngine, "_capture_written_sequence", return_value=999),
-        ):
+        with mock.patch.object(paste_engine, "_open_clipboard_retry") as retry, \
+            mock.patch.object(paste_engine.win32clipboard, "EmptyClipboard") as empty, \
+            mock.patch.object(paste_engine.win32clipboard, "SetClipboardData"), \
+            mock.patch.object(paste_engine.win32clipboard, "CloseClipboard"), \
+            mock.patch.object(PasteEngine, "_capture_written_sequence", return_value=999):
             result = PasteEngine()._set_clipboard_image(png_bytes)
 
         self.assertFalse(result.clipboard_set)
@@ -503,16 +467,14 @@ class PasteEngineTests(unittest.TestCase):
         threads = SyncThreadFactory()
         monitor = FakeMonitor()
         engine = PasteEngine(thread_factory=threads)
-        with (
-            mock.patch.object(paste_engine, "_open_clipboard_retry", return_value=True),
-            mock.patch.object(paste_engine.win32clipboard, "EmptyClipboard"),
+        with mock.patch.object(paste_engine, "_open_clipboard_retry", return_value=True), \
+            mock.patch.object(paste_engine.win32clipboard, "EmptyClipboard"), \
             mock.patch.object(
                 paste_engine.win32clipboard,
                 "SetClipboardText",
                 side_effect=RuntimeError("synthetic failure"),
-            ),
-            mock.patch.object(paste_engine.win32clipboard, "CloseClipboard") as close,
-        ):
+            ), \
+            mock.patch.object(paste_engine.win32clipboard, "CloseClipboard") as close:
             result = engine.paste("synthetic fixture", monitor=monitor)
 
         self.assertFalse(result.clipboard_set)
@@ -524,11 +486,9 @@ class PasteEngineTests(unittest.TestCase):
         # T5 (P2-2): partial SendInput (3/4) must fail with send_error kept.
         fake_user32 = FakeUser32(send_count=3)
         fake_kernel32 = FakeKernel32(error=5)
-        with (
-            mock.patch.object(paste_engine, "user32", fake_user32),
-            mock.patch.object(paste_engine, "kernel32", fake_kernel32),
-            mock.patch.object(paste_engine.time, "sleep"),
-        ):
+        with mock.patch.object(paste_engine, "user32", fake_user32), \
+            mock.patch.object(paste_engine, "kernel32", fake_kernel32), \
+            mock.patch.object(paste_engine.time, "sleep"):
             completion = PasteEngine()._focus_and_press(100)
 
         self.assertFalse(completion.success)
@@ -552,10 +512,8 @@ class PasteEngineTests(unittest.TestCase):
         fake_user32 = FakeUser32(send_count=4)
         fake_user32.GetForegroundWindow = mock.Mock(side_effect=[100, 200])
         fake_user32.GetClipboardSequenceNumber = mock.Mock(return_value=77)
-        with (
-            mock.patch.object(paste_engine, "user32", fake_user32),
-            mock.patch.object(paste_engine.time, "sleep"),
-        ):
+        with mock.patch.object(paste_engine, "user32", fake_user32), \
+            mock.patch.object(paste_engine.time, "sleep"):
             completion = PasteEngine()._focus_and_press(100, expected_sequence=77)
 
         self.assertFalse(completion.success)
@@ -566,10 +524,8 @@ class PasteEngineTests(unittest.TestCase):
     def test_final_gate_aborts_on_late_clipboard_change(self):
         fake_user32 = FakeUser32(send_count=4)
         fake_user32.GetClipboardSequenceNumber = mock.Mock(side_effect=[77, 78])
-        with (
-            mock.patch.object(paste_engine, "user32", fake_user32),
-            mock.patch.object(paste_engine.time, "sleep"),
-        ):
+        with mock.patch.object(paste_engine, "user32", fake_user32), \
+            mock.patch.object(paste_engine.time, "sleep"):
             completion = PasteEngine()._focus_and_press(100, expected_sequence=77)
 
         self.assertFalse(completion.success)
@@ -592,11 +548,9 @@ class PasteEngineTests(unittest.TestCase):
         threads = SyncThreadFactory()
         monitor = FakeMonitor()
         engine = PasteEngine(thread_factory=threads)
-        with (
-            mock.patch.object(engine, "_set_clipboard_text",
-                              return_value=paste_engine.ClipboardWriteResult(True, 77)),
-            mock.patch.object(PasteEngine, "_focus_and_press", return_value=make_completion()),
-        ):
+        with mock.patch.object(engine, "_set_clipboard_text",
+                              return_value=paste_engine.ClipboardWriteResult(True, 77)), \
+            mock.patch.object(PasteEngine, "_focus_and_press", return_value=make_completion()):
             result = engine.paste("hello", monitor=monitor)
 
         self.assertTrue(result.started)

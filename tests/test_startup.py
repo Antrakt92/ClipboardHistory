@@ -134,12 +134,10 @@ class ApplicationStartupTests(unittest.TestCase):
         replacements["load_privacy_settings"] = mock.Mock(return_value={
             "retention_days": 7, "excluded_processes": ("synthetic.exe",),
         })
-        with (
-            mock.patch.dict(self.namespace, replacements),
-            mock.patch("tkinter.Tk", return_value=root),
-            mock.patch("customtkinter.CTk", return_value=root),
-            mock.patch("app.popup_window.PopupWindow") as popup_factory,
-        ):
+        with mock.patch.dict(self.namespace, replacements), \
+            mock.patch("tkinter.Tk", return_value=root), \
+            mock.patch("customtkinter.CTk", return_value=root), \
+            mock.patch("app.popup_window.PopupWindow") as popup_factory:
             # Also replace an eager import if present, so the old startup stays inert.
             with mock.patch.dict(self.namespace, {"PopupWindow": popup_factory}):
                 app = self.app_class()
@@ -166,10 +164,8 @@ class ApplicationStartupTests(unittest.TestCase):
         app.hotkey = old
         fresh = mock.Mock()
         fresh.wait_ready.return_value = True
-        with (
-            mock.patch.dict(self.namespace, {"HotkeyManager": mock.Mock(return_value=fresh)}),
-            mock.patch.object(self.namespace["ctypes"].windll.user32, "GetForegroundWindow", return_value=123),
-        ):
+        with mock.patch.dict(self.namespace, {"HotkeyManager": mock.Mock(return_value=fresh)}), \
+            mock.patch.object(self.namespace["ctypes"].windll.user32, "GetForegroundWindow", return_value=123):
             app._show_popup_from_tray()
 
         fresh.start.assert_called_once()
@@ -230,10 +226,8 @@ class ApplicationStartupTests(unittest.TestCase):
         healthy.error_message = None
         app.hotkey = healthy
         factory = mock.Mock()
-        with (
-            mock.patch.dict(self.namespace, {"HotkeyManager": factory}),
-            mock.patch.object(self.namespace["ctypes"].windll.user32, "GetForegroundWindow", return_value=123),
-        ):
+        with mock.patch.dict(self.namespace, {"HotkeyManager": factory}), \
+            mock.patch.object(self.namespace["ctypes"].windll.user32, "GetForegroundWindow", return_value=123):
             app._show_popup_from_tray()
 
         factory.assert_not_called()
@@ -243,16 +237,14 @@ class ApplicationStartupTests(unittest.TestCase):
     def test_invalid_privacy_settings_stop_before_monitor_starts(self):
         root = mock.Mock()
         monitor = mock.Mock()
-        with (
-            mock.patch.dict(self.namespace, {
+        with mock.patch.dict(self.namespace, {
                 "ensure_data_dir": mock.Mock(),
                 "configure_logging": mock.Mock(),
                 "migrate_legacy_db": mock.Mock(),
                 "load_privacy_settings": mock.Mock(side_effect=ValueError("invalid privacy settings")),
                 "ClipboardMonitor": monitor,
-            }),
-            mock.patch("tkinter.Tk", return_value=root),
-        ):
+            }), \
+            mock.patch("tkinter.Tk", return_value=root):
             with self.assertRaisesRegex(ValueError, "invalid privacy settings"):
                 self.app_class()
         monitor.assert_not_called()

@@ -79,14 +79,12 @@ class LoggingSetupTests(unittest.TestCase):
     def test_file_handler_failure_falls_back_without_raising(self):
         stream = io.StringIO()
 
-        with (
-            mock.patch.object(
+        with mock.patch.object(
                 logging_setup,
                 "RotatingFileHandler",
                 side_effect=OSError("cannot open"),
-            ),
-            mock.patch("sys.stderr", stream),
-        ):
+            ), \
+            mock.patch("sys.stderr", stream):
             logging_setup.configure_logging(
                 r"C:\missing\clipboard_history.log",
                 console=True,

@@ -1,4 +1,4 @@
 customtkinter>=6.0.0
-pywin32>=306
+pywin32>=312
 pystray>=0.19.5
 Pillow>=10.0.0

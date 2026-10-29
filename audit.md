@@ -23,8 +23,15 @@ amplification risk. Other advisory paths remain to be assessed. Python 3.8 remai
 but its dependency security limitations should be considered when reviewing
 the minimum Python version and image-handling risks.
 
-Next steps: assess relevant Pillow advisories against the image-handling paths
-and revisit the supported Python versions when deciding how to address the risk.
+Normal clipboard capture converts DIB data to PNG before storage, while image
+previews open stored blobs without restricting their format. The provenance and
+trust boundary of older or modified databases are not established. For example,
+the [JPEG thumbnail advisory](https://github.com/python-pillow/Pillow/security/advisories/GHSA-8g5g-8vmr-9782)
+requires a specially crafted JPEG and a vulnerable JPEG library; a supported
+path that stores such a JPEG has not been established.
+
+Next steps: assess remaining Pillow advisories and database/icon provenance,
+then revisit the supported Python versions and image-handling boundaries.
 
 ### CH-AUDIT-008 - Real GUI and Win32 behavior still needs manual checks
 

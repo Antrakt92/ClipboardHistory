@@ -37,6 +37,19 @@ def make_dib_header(width, height):
     return bytes(header)
 
 
+def make_indexed_dib(header_size, bits, compression):
+    # Two red pixels, with either a padded raw row or a short RLE run and EOB.
+    pixels = (b'\x02\x01\x00\x01' if bits == 8 else b'\x02\x11\x00\x01')
+    if compression == 0:
+        pixels = (b'\x01\x01\x00\x00' if bits == 8 else b'\x11\x00\x00\x00')
+    header = bytearray(header_size)
+    struct.pack_into('<IiiHHIIiiII', header, 0, header_size, 2, 1, 1, bits,
+                     compression, len(pixels), 0, 0, 1 << bits, 0)
+    palette = bytearray((1 << bits) * 4)
+    palette[4:8] = b'\x00\x00\xff\x00'
+    return bytes(header) + bytes(palette) + pixels
+
+
 class ClipboardMonitorImageTests(unittest.TestCase):
     def test_file_drop_is_tagged_as_text_paths_for_clear_popup_label(self):
         callback = mock.Mock()
@@ -176,6 +189,29 @@ class ClipboardMonitorImageTests(unittest.TestCase):
         self.assertIsNotNone(png_bytes)
         self.assertTrue(png_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_small_bitfields_dib_converts_to_png(self):
+        header = struct.pack('<IiiHHIIiiII', 40, 1, 1, 1, 16, 3, 4, 0, 0, 0, 0)
+        masks = struct.pack('<III', 0xF800, 0x07E0, 0x001F)
+        dib = header + masks + b'\x00\xf8\x00\x00'
+
+        png_bytes = ClipboardMonitor._process_dib_image(dib)
+
+        self.assertIsNotNone(png_bytes)
+        with Image.open(io.BytesIO(png_bytes)) as image:
+            self.assertEqual((255, 0, 0), image.convert('RGB').getpixel((0, 0)))
+
+    def test_uncompressed_indexed_dib_converts_to_png(self):
+        for header_size in (40, 108, 124):
+            for bits in (4, 8):
+                with self.subTest(header_size=header_size, bits=bits):
+                    dib = make_indexed_dib(header_size, bits, 0)
+                    png_bytes = ClipboardMonitor._process_dib_image(dib)
+                    self.assertIsNotNone(png_bytes)
+                    with Image.open(io.BytesIO(png_bytes)) as image:
+                        rgb = image.convert('RGB')
+                        self.assertEqual((255, 0, 0), rgb.getpixel((0, 0)))
+                        self.assertEqual((255, 0, 0), rgb.getpixel((1, 0)))
+
     def test_full_hd_and_1440p_raw_dibs_clear_new_raw_gate(self):
         for width, height in ((1920, 1080), (2560, 1440)):
             with self.subTest(size=(width, height)):
@@ -210,6 +246,32 @@ class ClipboardMonitorImageTests(unittest.TestCase):
     def test_short_dib_is_rejected(self):
         self.assertIsNone(ClipboardMonitor._process_dib_image(bytes(10)))
         self.assertIsNone(ClipboardMonitor._dib_to_png(bytes(10)))
+
+    def test_rle_dib_is_rejected_before_pillow_decoding(self):
+        for header_size in (40, 108, 124):
+            for bits, compression in ((8, 1), (4, 2)):
+                with self.subTest(header_size=header_size, compression=compression):
+                    dib = make_indexed_dib(header_size, bits, compression)
+                    with mock.patch.object(clipboard_monitor.Image, "open") as open_image:
+                        self.assertIsNone(ClipboardMonitor._process_dib_image(dib))
+                        self.assertIsNone(ClipboardMonitor._dib_to_png(dib))
+                    open_image.assert_not_called()
+
+    def test_rle_clipboard_image_is_not_recorded(self):
+        dib = make_indexed_dib(40, 8, 1)
+        callback = mock.Mock()
+        monitor = ClipboardMonitor(callback)
+        with mock.patch.object(monitor, '_allows_history_capture', return_value=True), \
+            mock.patch.object(clipboard_monitor.win32clipboard, 'OpenClipboard'), \
+            mock.patch.object(clipboard_monitor.win32clipboard, 'CloseClipboard'), \
+            mock.patch.object(clipboard_monitor.win32clipboard, 'IsClipboardFormatAvailable', side_effect=lambda fmt: fmt == 8), \
+            mock.patch.object(clipboard_monitor.win32clipboard, 'GetClipboardData', return_value=dib), \
+            mock.patch.object(ClipboardMonitor, '_dib_to_png', wraps=ClipboardMonitor._dib_to_png) as convert, \
+            mock.patch.object(clipboard_monitor.Image, 'open') as open_image:
+            self.assertEqual(CLIPBOARD_READ_OK, monitor._read_clipboard_once())
+        convert.assert_called_once_with(dib)
+        open_image.assert_not_called()
+        callback.assert_not_called()
 
     def test_bad_header_size_dib_is_rejected(self):
         header = bytearray(make_dib_header(32, 24))

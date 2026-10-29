@@ -606,6 +606,10 @@ class ClipboardMonitor:
 
             # Account for BI_BITFIELDS color masks (3 DWORDs after header)
             compression = struct.unpack_from('<I', dib_data, 16)[0]
+            # Pillow's BMP RLE decoder can amplify small inputs into large allocations.
+            if compression in (1, 2):  # BI_RLE8 / BI_RLE4
+                log.debug("Skipping RLE-compressed clipboard image")
+                return None
             masks_size = 0
             if compression in (3, 6) and bi_size == 40:  # BI_BITFIELDS / BI_ALPHABITFIELDS with BITMAPINFOHEADER
                 masks_size = 12 if compression == 3 else 16

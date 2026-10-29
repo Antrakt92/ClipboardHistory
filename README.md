@@ -1,114 +1,86 @@
-# Clipboard History
+<p align="center"><img src="app/assets/icon.png" alt="Clipboard History icon" width="96" height="96"></p>
 
-Lightweight clipboard history manager for Windows. Lives in the system tray, records copied text and images, and lets you paste a previous entry with a single click.
+<h1 align="center">Clipboard History</h1>
 
-![Python](https://img.shields.io/badge/python-3.8+-blue)
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey)
+<p align="center">Search, pin and paste copied text and images on Windows.</p>
+
+<p align="center">
+  <a href="#installation">Installation</a>
+  · <a href="docs/REFERENCE.md">Usage and privacy reference</a>
+  · <a href="https://github.com/Antrakt92/ClipboardHistory/issues">Report a problem</a>
+</p>
+
+Clipboard History runs in the system tray. Press **Ctrl+Shift+V** to open your
+history, search for an entry and select it to paste into the previous window.
 
 ## Features
 
-- **Global hotkey** — `Ctrl+Shift+V` opens the popup from anywhere (works on any keyboard layout)
-- **Text & images** — captures both text and image clipboard content (screenshots, copied images)
-- **Image preview** — hover over an image entry to see a larger preview
-- **Search** — filter history asynchronously with case-insensitive Unicode matching, including Cyrillic; `%`, `_`, and backslashes are literal characters
-- **Pin** — pin important entries so they stay at the top
-- **Pause recording** — temporarily stop saving new clipboard entries from the tray menu
-- **Clipboard privacy markers** — respects applications' Windows clipboard-history opt-out flags before reading their content
-- **Explicit clearing** — clear unpinned history separately, or delete all entries including pinned ones
-- **Click to paste** — select any entry and it gets pasted into the previously active window
-- **Keyboard navigation** — `Up`/`Down` to move, `Enter` to paste, `Escape` to close
-- **System tray** — runs quietly in the background with a tray icon menu
-- **Auto-start** — optionally start with Windows (toggle from tray menu)
-- **Single instance** — prevents duplicate processes via Windows Mutex
-- **Deduplication** — consecutive identical copies are stored only once
-- **SQLite storage** — up to 500 unpinned entries, with configurable 1–365-day expiry (30 days by default); pinned entries stay until unpinned, deleted, or explicit `Delete all`
+- Capture copied text and images, with an image preview on hover.
+- Search stored text with case-insensitive Unicode matching.
+- Pin entries, delete individual rows or clear unpinned history.
+- Pause recording from the tray menu and optionally start with Windows.
+- Use Up/Down, Enter and Escape to navigate the popup.
+- Keep up to 500 unpinned entries; the default expiry is 30 days.
+
+Copied files are stored as **FILE PATHS (text)**. Pasting those entries inserts
+the paths as text; it does not restore a file-copy operation. Text entries retain
+up to 50,000 characters and label longer copies with the stored-prefix length.
 
 ## Installation
 
-```bash
-pip install -r requirements.txt
+Requires **Windows 10 or 11 and Python 3.8 or newer**. From a local checkout,
+create a virtual environment and install the dependencies:
+
+```powershell
+git clone https://github.com/Antrakt92/ClipboardHistory.git
+cd ClipboardHistory
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+.venv\Scripts\pythonw main.pyw
 ```
 
-### Dependencies
+The app appears in the system tray. For console diagnostics, use
+`.venv\Scripts\python main.pyw`. The repository contains the Python source;
+there is no standalone Windows installer in the current release.
 
-- [customtkinter](https://github.com/TomSchimansky/CustomTkinter) — modern UI
-- [pywin32](https://github.com/mhammond/pywin32) — clipboard access
-- [pystray](https://github.com/moses-palmer/pystray) — system tray icon
-- [Pillow](https://python-pillow.org/) — image processing
+## Controls
 
-## Usage
-
-```bash
-# Normal use (no console window)
-pythonw main.pyw
-
-# Debug mode (with console output)
-python main.pyw
-```
-
-The app appears in the system tray. Copy text or images as usual — they are saved automatically. Use `Pause recording` in the tray menu when you temporarily do not want new clipboard entries stored.
-
-Windows autostart uses a small `ClipboardHistory.exe` launcher with the app's name
-and clipboard icon, so the entry no longer inherits Python's branding. Enabling
-autostart builds it locally from `app/assets/ClipboardHistoryLauncher.cs` using
-Windows' existing .NET Framework compiler; no packages are downloaded. The launcher
-and build metadata live under `%LOCALAPPDATA%\ClipboardHistory\Launcher` and start
-the same Python environment and `main.pyw` without a console. Build failure leaves
-the previous startup entry untouched. Legacy Python entries remain recognized;
-switching autostart on writes the branded entry. The tray checks that the branded
-launcher and its build metadata still match; toggle autostart on to rebuild a
-missing or changed launcher. An already running process keeps
-its loaded code until its next restart.
-
-Press `Ctrl+Shift+V` to open the history popup, then click any item to paste it.
-
-The popup is created on its first use, keeping Windows sign-in startup lighter. Later openings reuse the same window. Auto-paste is cancelled if the target window cannot be activated, focus changes, or another app changes the clipboard during the paste delay. If Ctrl, Shift, Alt, or a Windows key is still held, auto-paste waits up to 0.8 seconds for release and cancels if it stays held. This prevents held hotkey keys from turning the paste into another shortcut. A tray notice distinguishes a failed copy from a successful copy whose automatic paste was cancelled; notices do not include clipboard content.
-
-While editing a search, `Delete` edits the query; use the row's `Del` action to delete an entry. Search runs outside the popup's UI thread. Actions on old results are blocked until the current search completes; select the desired result after the refresh.
-
-Popup placement accounts for Windows display scaling and reduces its size when the monitor work area is smaller than the normal window.
-
-Use `Clear unpinned` to remove regular history while keeping pinned entries. Use `Delete all` when you want to remove pinned and unpinned entries together.
-
-Recording pause skips clipboard reads and image conversion. Entries marked with `ExcludeClipboardContentFromMonitorProcessing` or `CanIncludeInClipboardHistory=0` are also skipped; these are the [Windows clipboard-history privacy formats](https://learn.microsoft.com/en-us/windows/win32/dataxchg/clipboard-formats#cloud-clipboard-and-clipboard-history-formats). Apps must supply these markers for them to take effect. History is stored locally in `%APPDATA%\ClipboardHistory\clipboard_history.db`.
-
-For a shorter retention period or process exclusions, create `%APPDATA%\ClipboardHistory\privacy.json` and restart the app. For example:
-
-```json
-{"retention_days": 7, "excluded_processes": ["PrivateApp.exe"]}
-```
-
-Only exact executable names are accepted. When exclusions are configured, a clipboard update with an unknown owner is skipped rather than captured. This uses the clipboard owner process and cannot identify every source inside a shared browser or helper process. Invalid settings stop startup before recording and are logged without the settings' contents. Existing pinned entries do not expire. Successful paste updates the entry timestamp (touch_entry) and restarts its retention window. Clearing history does not securely erase SQLite free pages, old migration copies, or quarantined files.
-
-When upgrading from a version that stored `clipboard_history.db` beside the application, the first migration creates a verified snapshot in the new location. The original database and any sidecar files remain as a recovery copy. Clearing the current history does not erase that old copy; remove it manually only after confirming the migrated history is complete and closing any old application instance. If migration fails, startup stops and records the error in the application log.
-
-Text entries store up to 50,000 characters, so search and paste cover that stored prefix. Longer entries explicitly show `First 50,000 of … chars` in their row. Newly copied files are labeled `FILE PATHS (text)`; selecting one pastes the saved paths as text, not the files themselves. Entries saved by older versions remain ordinary text rows. Deleted database pages are reused for later entries; the app no longer runs an automatic `VACUUM`, so the database file may not shrink after clearing history. To compact the file offline, close the app and run `python tools/secure_compact.py --db "%APPDATA%\ClipboardHistory\clipboard_history.db"` (dry-run without `--yes`); it verifies integrity, keeps a timestamped backup, and atomically replaces the database. This removes free pages from the active file but is not forensic erasure of old disk bytes.
-
-## Validation and performance
-
-Run `python -m unittest discover -s tests`, `python -m compileall -q main.pyw app tests`, and `python -m ruff check .` in an environment with the app dependencies installed.
-
-The [September 5 audit](docs/audit-2026-09-05.md) covers search and keyboard safety, modifier-aware pasting, a consistent page/count query, measured search costs, and remaining Windows smoke checks.
-
-The [September audit report](docs/audit-2026-09-03.md) records the fixes, synthetic startup measurements, and remaining manual Windows checks. To repeat its isolated startup comparison, run `python tests/benchmark_startup.py 92a8e315c5ed23b893f7fbba12fa9a4082875651`. The benchmark mocks application services and does not read or modify the real clipboard or history database.
-
-The [follow-up audit](docs/audit-followup-2026-09-03.md) covers additional hotkey, popup, and persistence fixes. The [storage report](docs/audit-storage-2026-09-03.md) records historical synthetic measurements of the former compaction behavior. Full integrity checks remain enabled.
-
-## How It Works
-
-| Component | Role |
+| Action | Control |
 |---|---|
-| `main.pyw` | Entry point, orchestrates all modules |
-| `app/clipboard_monitor.py` | Listens for clipboard changes via Win32 `AddClipboardFormatListener` |
-| `app/hotkey_manager.py` | Registers global `Ctrl+Shift+V` via Win32 `RegisterHotKey` (layout-independent) |
-| `app/popup_window.py` | CustomTkinter popup with search, pin, delete, image preview |
-| `app/paste_engine.py` | Sets clipboard content and simulates `Ctrl+V` in the target window |
-| `app/database.py` | SQLite CRUD with thread-safe locking, image BLOB storage |
-| `app/tray_icon.py` | System tray icon and menu via pystray |
-| `app/autostart.py` | Windows registry auto-start management |
-| `app/config.py` | All constants and paths |
+| Open history | Ctrl+Shift+V |
+| Paste an entry | Click it or select it and press Enter |
+| Search | Type in the search field |
+| Keep an entry | Pin it |
+| Remove one entry | Its Del action; Delete in the search field edits the query |
+| Stop recording temporarily | Tray → Pause recording |
+| Clear regular history | Tray → Clear unpinned |
+| Clear all history, including pins | Tray → Delete all |
 
-## Requirements
+Automatic paste is cancelled if focus or the clipboard changes, or if shortcut
+keys remain held. A notice distinguishes a failed copy from a cancelled paste.
+You can still paste copied content manually.
 
-- Windows 10 / 11
-- Python 3.8+
+## Privacy and storage
+
+History is stored locally at `%APPDATA%\ClipboardHistory\clipboard_history.db`.
+Use Pause recording before copying content you do not want saved. The app also
+honors supported Windows clipboard-history opt-out markers when supplied by the
+source application.
+
+Unpinned retention can be set from 1 to 365 days, and exact executable names can
+be excluded through `privacy.json`. Pins remain until removed. Process exclusions
+cannot identify every source inside a browser or helper process.
+
+Deleting history is not secure erasure of SQLite free pages, migration copies
+or old disk bytes. Read the [privacy and storage reference](docs/REFERENCE.md)
+for configuration, migration behavior and the optional offline compaction tool.
+
+## Help and development
+
+Report bugs in [GitHub Issues](https://github.com/Antrakt92/ClipboardHistory/issues)
+with reproduction steps, Windows/Python versions and the expected result. Use
+synthetic examples; do not attach your clipboard database, private images or
+unredacted logs.
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers source layout and local checks.
+[CHANGELOG.md](CHANGELOG.md) records release history.

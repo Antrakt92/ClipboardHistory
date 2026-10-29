@@ -28,8 +28,11 @@ up to 50,000 characters and label longer copies with the stored-prefix length.
 
 ## Installation
 
-Requires **Windows 10 or 11 and Python 3.8 or newer**. From a local checkout,
-create a virtual environment and install the dependencies:
+Requires **Windows 10 or 11 and Python 3.8 or newer**. Python 3.8 can only
+install an older Pillow release with known security advisories. Python 3.11 or
+newer is recommended to use current Pillow releases.
+
+From a local checkout, create a virtual environment and install the dependencies:
 
 ```powershell
 git clone https://github.com/Antrakt92/ClipboardHistory.git

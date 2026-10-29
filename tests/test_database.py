@@ -619,6 +619,32 @@ class DatabaseTests(unittest.TestCase):
             finally:
                 db.close()
 
+    def test_text_duplicates_use_latest_id_when_timestamps_tie(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with mock.patch("app.database.time.time", return_value=1_800_000_000):
+                    self.assertTrue(db.add_entry("synthetic", "text"))
+                    self.assertTrue(db.add_entry("synthetic", "file_paths"))
+                    self.assertFalse(db.add_entry("synthetic", "file_paths"))
+                    self.assertTrue(db.add_entry("synthetic", "text"))
+                    self.assertFalse(db.add_entry("synthetic", "text"))
+                self.assertEqual(3, db.get_history_count())
+            finally:
+                db.close()
+
+    def test_image_duplicates_use_latest_id_when_timestamps_tie(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db = Database(os.path.join(temp_dir, "history.db"))
+            try:
+                with mock.patch("app.database.time.time", return_value=1_800_000_000):
+                    self.assertTrue(db.add_entry(None, "image", b"synthetic-image-a"))
+                    self.assertTrue(db.add_entry(None, "image", b"synthetic-image-b"))
+                    self.assertFalse(db.add_entry(None, "image", b"synthetic-image-b"))
+                self.assertEqual(2, db.get_history_count())
+            finally:
+                db.close()
+
     def test_file_paths_are_text_payloads_with_separate_dedup_and_search(self):
         paths = "C:\\Synthetic\\alpha.txt\nC:\\Synthetic\\beta.txt"
         with tempfile.TemporaryDirectory() as temp_dir:

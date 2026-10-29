@@ -255,7 +255,7 @@ class Database:
             cursor = self.conn.execute(
                 """SELECT content, content_type, content_hash
                    FROM clipboard_history
-                   ORDER BY timestamp DESC LIMIT 1"""
+                   ORDER BY timestamp DESC, id DESC LIMIT 1"""
             )
             row = cursor.fetchone()
             if self._is_duplicate_text(row, content_type, record["content_hash"], record["content"]):
@@ -300,7 +300,7 @@ class Database:
                 return False
             # Dedup: check last entry
             cursor = self.conn.execute(
-                "SELECT image_hash FROM clipboard_history ORDER BY timestamp DESC LIMIT 1"
+                "SELECT image_hash FROM clipboard_history ORDER BY timestamp DESC, id DESC LIMIT 1"
             )
             row = cursor.fetchone()
             if row and row["image_hash"] == img_hash:
